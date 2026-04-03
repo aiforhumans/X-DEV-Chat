@@ -57,6 +57,7 @@ import {
   semanticPrefilterFacts,
 } from './lib/semanticSearch'
 import { optimizeCustomPersona, optimizeScenarioPrompt, optimizeSystemPrompt } from './lib/systemPromptOptimizer'
+import { buildVectorExportPayload } from './lib/vectorExport'
 import type {
   ChatMessage,
   EmbeddingStatus,
@@ -1013,6 +1014,34 @@ function App() {
     }
   }
 
+  const exportVectorData = (): void => {
+    try {
+      const payload = buildVectorExportPayload(memoryGraphRef.current)
+      if (payload.vectorCount === 0) {
+        setErrorBanner('No vector data available to export')
+        return
+      }
+
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const fileName = `brain-vectors-${stamp}.json`
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = fileName
+      link.click()
+      URL.revokeObjectURL(url)
+      setStatusLine(`Exported ${payload.vectorCount} vectors to ${fileName}`)
+      setMemoryStatus('Vector export complete')
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setErrorBanner(`Vector export failed: ${message}`)
+      setStatusLine('Vector export failed')
+    }
+  }
+
   const upsertFileJob = (job: FileIngestJob): void => {
     setFileJobs((current) => {
       const index = current.findIndex((item) => item.id === job.id)
@@ -1745,6 +1774,9 @@ function App() {
           disabled={isStreaming || embeddingStatus === 'loading' || memoryGraph.facts.length < 2}
         >
           Analyze and merge vector memories
+        </button>
+        <button onClick={exportVectorData} disabled={isStreaming || vectorMemoryCount === 0}>
+          Export vector data
         </button>
         <button onClick={clearAllMemories} disabled={memoryGraph.facts.length === 0 || isStreaming}>
           Clear all memories

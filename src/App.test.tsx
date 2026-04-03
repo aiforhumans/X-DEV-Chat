@@ -434,4 +434,67 @@ describe('App', () => {
       expect(screen.getByLabelText('Scenario block')).toHaveValue('System optimized output')
     })
   })
+
+  it('exports vector data as JSON when vectors are available', async () => {
+    mocks.mockLoadMemoryGraph.mockResolvedValueOnce({
+      facts: [
+        {
+          id: 'fact-1',
+          canonicalText: 'User likes concise responses',
+          category: 'preference',
+          status: 'active',
+          confidence: 0.8,
+          sourceTags: ['chat'],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      evidence: [],
+      aliases: [],
+      conflicts: [],
+      vectorIndex: [
+        {
+          factId: 'fact-1',
+          vector: [0.1, 0.2, 0.3],
+          updatedAt: new Date().toISOString(),
+          provider: 'browser',
+          model: 'Xenova/all-MiniLM-L6-v2',
+        },
+      ],
+    })
+
+    const createUrl = vi.fn(() => 'blob:vector-export')
+    const revokeUrl = vi.fn()
+    Object.defineProperty(window.URL, 'createObjectURL', {
+      value: createUrl,
+      configurable: true,
+    })
+    Object.defineProperty(window.URL, 'revokeObjectURL', {
+      value: revokeUrl,
+      configurable: true,
+    })
+    const createElementOriginal = document.createElement.bind(document)
+    const anchorClick = vi.fn()
+    vi.spyOn(document, 'createElement').mockImplementation((tagName: string): HTMLElement => {
+      const element = createElementOriginal(tagName)
+      if (tagName.toLowerCase() === 'a') {
+        Object.defineProperty(element, 'click', {
+          value: anchorClick,
+          configurable: true,
+        })
+      }
+      return element
+    })
+
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const exportButton = await screen.findByRole('button', { name: 'Export vector data' })
+    expect(exportButton).not.toBeDisabled()
+    fireEvent.click(exportButton)
+
+    expect(createUrl).toHaveBeenCalledTimes(1)
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+    expect(revokeUrl).toHaveBeenCalledWith('blob:vector-export')
+  })
 })
