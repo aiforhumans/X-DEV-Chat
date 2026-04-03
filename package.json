@@ -2,11 +2,24 @@
   "name": "cchhat",
   "private": true,
   "version": "0.0.0",
+  "description": "Local-first LM Studio chat UI with streaming, memory graph, and prompt optimization.",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "lm-studio",
+    "react",
+    "vite",
+    "local-llm",
+    "chat-ui",
+    "typescript"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "check": "npm run test && npm run build",
     "test": "npm run test:unit",
     "test:unit": "vitest run --exclude \"src/**/*.integration.test.ts\"",
     "test:coverage": "vitest run --coverage --exclude \"src/**/*.integration.test.ts\"",
