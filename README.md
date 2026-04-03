@@ -1,6 +1,32 @@
-# LM Studio Local Chat
+# X-DEV-Chat
 
-Local-first React + Vite chat app for LM Studio with streaming responses, persistent memory, and prompt/persona optimization.
+[![CI](https://github.com/aiforhumans/X-DEV-Chat/actions/workflows/ci.yml/badge.svg)](https://github.com/aiforhumans/X-DEV-Chat/actions/workflows/ci.yml)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/react-19-blue)](https://react.dev/)
+[![TypeScript](https://img.shields.io/badge/typescript-5.9-blue)](https://www.typescriptlang.org/)
+[![Vite](https://img.shields.io/badge/vite-8-purple)](https://vitejs.dev/)
+
+Local-first React + Vite chat UI for [LM Studio](https://lmstudio.ai/) with streaming responses, multi-layer persistent memory, and prompt/persona optimization.
+
+---
+
+## Table of Contents
+
+- [Highlights](#highlights)
+- [Tech Stack](#tech-stack)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Scripts](#scripts)
+- [Environment Variables](#environment-variables)
+- [Feature Notes](#feature-notes)
+- [Project Structure](#project-structure)
+- [CI / GitHub Workflow](#ci--github-workflow)
+- [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Highlights
 
@@ -18,16 +44,18 @@ Local-first React + Vite chat app for LM Studio with streaming responses, persis
 
 ## Tech Stack
 
-- React 19
-- TypeScript
-- Vite 8
-- Vitest + Testing Library
-- Dexie (IndexedDB)
+| Technology | Version |
+| --- | --- |
+| [React](https://react.dev/) | 19 |
+| [TypeScript](https://www.typescriptlang.org/) | ~5.9 |
+| [Vite](https://vitejs.dev/) | 8 |
+| [Vitest](https://vitest.dev/) + [Testing Library](https://testing-library.com/) | 3.x |
+| [Dexie](https://dexie.org/) (IndexedDB) | 4.x |
 
 ## Prerequisites
 
-- Node.js 20+
-- LM Studio installed and running locally
+- **Node.js 20+**
+- **[LM Studio](https://lmstudio.ai/)** installed and running locally
 - LM Studio local server enabled (default: `http://localhost:1234`)
 
 ## Quick Start
@@ -37,26 +65,26 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL shown in terminal (usually `http://localhost:5173`).
+Open the Vite dev URL shown in terminal (default: `http://localhost:5173`).
 
 ## Scripts
 
-| Command | What it does |
+| Command | Description |
 | --- | --- |
-| `npm run dev` | Starts Vite dev server |
-| `npm run build` | Type-checks and builds production assets |
-| `npm run preview` | Serves the production build locally |
-| `npm run test` | Runs unit tests (default test command) |
-| `npm run test:unit` | Runs unit tests excluding integration tests |
-| `npm run test:coverage` | Runs coverage checks for core libs and App/DB profiles |
-| `npm run test:coverage:core` | Runs stricter coverage thresholds for `src/lib/**` |
-| `npm run test:coverage:appdb` | Runs coverage thresholds for `src/App.tsx` and `src/db/**` |
-| `npm run test:integration` | Runs LM Studio live integration test suite |
-| `npm run check` | Runs tests and build (recommended before PRs) |
+| `npm run dev` | Start Vite dev server |
+| `npm run build` | Type-check and build production assets |
+| `npm run preview` | Serve the production build locally |
+| `npm run test` | Run unit tests (alias for `test:unit`) |
+| `npm run test:unit` | Run unit tests, excluding integration tests |
+| `npm run test:coverage` | Run all coverage profiles |
+| `npm run test:coverage:core` | Stricter coverage thresholds for `src/lib/**` |
+| `npm run test:coverage:appdb` | Coverage thresholds for `src/App.tsx` and `src/db/**` |
+| `npm run test:integration` | Run LM Studio live integration test suite |
+| `npm run check` | Run tests then build — recommended before opening a PR |
 
 ## Environment Variables
 
-Create `.env` from `.env.example` and adjust values as needed.
+Copy `.env.example` to `.env` and adjust values as needed.
 
 ### App Variables
 
@@ -68,7 +96,7 @@ Create `.env` from `.env.example` and adjust values as needed.
 
 ### Integration Test Variables (Optional)
 
-Only set these when running live LM Studio integration tests:
+Set these only when running live LM Studio integration tests:
 
 ```bash
 LMSTUDIO_TEST_INTEGRATION=1
@@ -82,78 +110,100 @@ LMSTUDIO_TEST_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 ### Chat + Model Runtime
 
 - Uses LM Studio REST endpoints for model lifecycle and chat streaming.
-- Uses an editable URL field with explicit `Apply URL` commit to avoid per-keystroke reconnect churn.
+- Editable URL field with explicit **Apply URL** commit avoids per-keystroke reconnect churn.
 - Maintains `previous_response_id` for stateful follow-up turns.
-- Supports reasoning stream capture in UI.
+- Captures reasoning stream output in the UI.
 
 ### Memory System (Brain v2)
 
-- Stores facts, evidence, aliases, conflicts, and vector index.
-- Preserves contradictory facts and tracks active winner.
+- Stores facts, evidence, aliases, conflicts, and a vector index.
+- Preserves contradictory facts and tracks the active winner.
 - Supports file-ingested facts (`.txt`, `.md`, `.csv`) with provenance.
-- Supports exporting vector index data as `GeoJSON`, `KML`, or `Shapefile (.zip)` from the Brain panel.
+- Exports vector index data as **GeoJSON**, **KML**, or **Shapefile (.zip)** from the Brain panel.
 
 ### Embeddings + Retrieval
 
-- Primary: browser embeddings (`Xenova/all-MiniLM-L6-v2`).
-- Fallback: LM Studio OpenAI-compatible embeddings.
-- Final fallback: local hash vector embeddings (`LocalHash/256`).
+| Priority | Provider |
+| --- | --- |
+| Primary | Browser embeddings (`Xenova/all-MiniLM-L6-v2`) |
+| Fallback | LM Studio OpenAI-compatible embeddings |
+| Final fallback | Local hash vector embeddings (`LocalHash/256`) |
 
 ## Project Structure
 
 ```text
 .
-|- .github/
-|  |- workflows/ci.yml
-|  |- pull_request_template.md
-|- docs/
-|  |- LINKAGE_AUDIT.md
-|- public/
-|- src/
-|  |- db/
-|  |- lib/
-|  |- test/
-|  |- types/
-|  |- App.tsx
-|  |- main.tsx
-|- .env.example
-|- package.json
-|- README.md
+├── .github/
+│   ├── workflows/ci.yml
+│   └── pull_request_template.md
+├── docs/
+│   └── LINKAGE_AUDIT.md
+├── public/
+├── src/
+│   ├── components/
+│   │   ├── BrainSidebar.tsx
+│   │   ├── ChatTimeline.tsx
+│   │   ├── ChatWorkspace.tsx
+│   │   ├── DebugDrawer.tsx
+│   │   ├── OptimizerPreviewModal.tsx
+│   │   └── VectorVisualizationModal.tsx
+│   ├── db/
+│   │   └── database.ts
+│   ├── hooks/
+│   │   └── useAutoResizeTextarea.ts
+│   ├── lib/               # Core logic: chat, memory, embeddings, optimization
+│   ├── test/              # Shared test setup and utilities
+│   ├── types/
+│   │   └── chat.ts
+│   ├── App.tsx
+│   └── main.tsx
+├── .env.example
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+└── README.md
 ```
 
-## GitHub Workflow
+## CI / GitHub Workflow
 
-- CI runs on push and pull requests using GitHub Actions.
-- Pipeline executes:
-  1. `npm ci`
-  2. `npm run test`
-  3. `npm run build`
-- Generated artifacts (`coverage/`, `.env`) are ignored and should not be committed.
+CI runs automatically on every push to `main`/`master` and on all pull requests.
+
+**Pipeline steps:**
+
+1. `npm ci` — install dependencies
+2. `npm run test` — run unit tests
+3. `npm run build` — type-check and build
+
+Generated artifacts (`coverage/`, `.env`) are git-ignored and must not be committed.
 
 ## Troubleshooting
 
-- Cannot connect to LM Studio:
-  - Verify LM Studio is open and local server is enabled.
-  - Confirm base URL/port in the app matches LM Studio.
-- No models listed:
-  - Refresh models in the sidebar.
-  - Confirm models are available in LM Studio.
-- Embedding errors:
-  - Retry embeddings in UI.
-  - Check Brain Debug logs for provider fallback status.
+**Cannot connect to LM Studio**
+- Verify LM Studio is open and the local server is enabled.
+- Confirm the base URL and port in the app match LM Studio's settings.
+
+**No models listed**
+- Use the **Refresh models** button in the sidebar.
+- Confirm models are downloaded and available in LM Studio.
+
+**Embedding errors**
+- Retry embeddings from the UI.
+- Check the Brain Debug panel logs for provider fallback status.
 
 ## Documentation
 
-- Architecture and linkage audit: [docs/LINKAGE_AUDIT.md](docs/LINKAGE_AUDIT.md)
-- Project snapshot: [project_summary.md](project_summary.md)
-- Engineering TODOs: [TODO.md](TODO.md)
+| Document | Description |
+| --- | --- |
+| [docs/LINKAGE_AUDIT.md](docs/LINKAGE_AUDIT.md) | Architecture and module linkage audit |
+| [project_summary.md](project_summary.md) | Project snapshot |
+| [TODO.md](TODO.md) | Engineering backlog and completed work |
 
 ## Contributing
 
-1. Create a feature branch.
+1. Fork the repository and create a feature branch.
 2. Make your changes with tests.
-3. Run `npm run check`.
-4. Open a pull request.
+3. Run `npm run check` to verify tests pass and the build succeeds.
+4. Open a pull request — the CI pipeline will run automatically.
 
 ## License
 
