@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import type { MemoryGraphState } from '../types/chat'
-import { buildVectorExportPayload } from './vectorExport'
+import {
+  buildVectorExportBlob,
+  buildVectorExportPayload,
+  buildVectorGeoJson,
+  buildVectorKml,
+} from './vectorExport'
 
 const makeGraph = (): MemoryGraphState => ({
   facts: [
@@ -53,5 +58,37 @@ describe('vectorExport', () => {
     expect(payload.vectorCount).toBe(0)
     expect(payload.vectors).toEqual([])
   })
-})
 
+  it('builds GeoJSON feature collection with point geometry', () => {
+    const payload = buildVectorExportPayload(makeGraph())
+    const geojson = buildVectorGeoJson(payload)
+    expect(geojson.type).toBe('FeatureCollection')
+    expect(geojson.features[0].geometry.type).toBe('Point')
+    expect(geojson.features[0].geometry.coordinates).toHaveLength(2)
+  })
+
+  it('builds KML with placemarks', () => {
+    const payload = buildVectorExportPayload(makeGraph())
+    const kml = buildVectorKml(payload)
+    expect(kml).toContain('<kml')
+    expect(kml).toContain('<Placemark>')
+    expect(kml).toContain('<coordinates>')
+  })
+
+  it('builds geojson and kml export blobs', async () => {
+    const payload = buildVectorExportPayload(makeGraph())
+    const geojson = await buildVectorExportBlob(payload, 'geojson')
+    const kml = await buildVectorExportBlob(payload, 'kml')
+    expect(geojson.extension).toBe('geojson')
+    expect(kml.extension).toBe('kml')
+    expect(geojson.blob.size).toBeGreaterThan(0)
+    expect(kml.blob.size).toBeGreaterThan(0)
+  })
+
+  it('builds shapefile zip export blob', async () => {
+    const payload = buildVectorExportPayload(makeGraph())
+    const shapefile = await buildVectorExportBlob(payload, 'shapefile')
+    expect(shapefile.extension).toBe('zip')
+    expect(shapefile.blob.size).toBeGreaterThan(0)
+  })
+})

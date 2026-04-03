@@ -435,7 +435,7 @@ describe('App', () => {
     })
   })
 
-  it('exports vector data as JSON when vectors are available', async () => {
+  it('exports vector data in selected geospatial format when vectors are available', async () => {
     mocks.mockLoadMemoryGraph.mockResolvedValueOnce({
       facts: [
         {
@@ -475,11 +475,15 @@ describe('App', () => {
     })
     const createElementOriginal = document.createElement.bind(document)
     const anchorClick = vi.fn()
+    let lastDownload = ''
     vi.spyOn(document, 'createElement').mockImplementation((tagName: string): HTMLElement => {
       const element = createElementOriginal(tagName)
       if (tagName.toLowerCase() === 'a') {
         Object.defineProperty(element, 'click', {
-          value: anchorClick,
+          value: () => {
+            lastDownload = (element as HTMLAnchorElement).download
+            anchorClick()
+          },
           configurable: true,
         })
       }
@@ -490,11 +494,15 @@ describe('App', () => {
     await screen.findByLabelText('Main LLM model')
 
     const exportButton = await screen.findByRole('button', { name: 'Export vector data' })
+    fireEvent.change(screen.getByLabelText('Vector export format'), { target: { value: 'kml' } })
     expect(exportButton).not.toBeDisabled()
     fireEvent.click(exportButton)
 
-    expect(createUrl).toHaveBeenCalledTimes(1)
-    expect(anchorClick).toHaveBeenCalledTimes(1)
-    expect(revokeUrl).toHaveBeenCalledWith('blob:vector-export')
+    await waitFor(() => {
+      expect(createUrl).toHaveBeenCalledTimes(1)
+      expect(anchorClick).toHaveBeenCalledTimes(1)
+      expect(revokeUrl).toHaveBeenCalledWith('blob:vector-export')
+    })
+    expect(lastDownload).toMatch(/\.kml$/i)
   })
 })

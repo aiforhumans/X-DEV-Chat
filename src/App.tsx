@@ -57,7 +57,11 @@ import {
   semanticPrefilterFacts,
 } from './lib/semanticSearch'
 import { optimizeCustomPersona, optimizeScenarioPrompt, optimizeSystemPrompt } from './lib/systemPromptOptimizer'
-import { buildVectorExportPayload } from './lib/vectorExport'
+import {
+  buildVectorExportBlob,
+  buildVectorExportPayload,
+  type VectorExportFormat,
+} from './lib/vectorExport'
 import type {
   ChatMessage,
   EmbeddingStatus,
@@ -134,6 +138,7 @@ function App() {
   const [hydratedFromDb, setHydratedFromDb] = useState(false)
   const [memoryStatus, setMemoryStatus] = useState('Idle')
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus>('idle')
+  const [vectorExportFormat, setVectorExportFormat] = useState<VectorExportFormat>('geojson')
   const [fileJobs, setFileJobs] = useState<FileIngestJob[]>([])
   const [dragActive, setDragActive] = useState(false)
   const [episodeStatus, setEpisodeStatus] = useState('Idle')
@@ -1014,7 +1019,7 @@ function App() {
     }
   }
 
-  const exportVectorData = (): void => {
+  const exportVectorData = async (): Promise<void> => {
     try {
       const payload = buildVectorExportPayload(memoryGraphRef.current)
       if (payload.vectorCount === 0) {
@@ -1023,17 +1028,16 @@ function App() {
       }
 
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-      const fileName = `brain-vectors-${stamp}.json`
-      const blob = new Blob([JSON.stringify(payload, null, 2)], {
-        type: 'application/json',
-      })
+      const artifact = await buildVectorExportBlob(payload, vectorExportFormat)
+      const fileName = `brain-vectors-${stamp}.${artifact.extension}`
+      const blob = artifact.blob
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
       link.download = fileName
       link.click()
       URL.revokeObjectURL(url)
-      setStatusLine(`Exported ${payload.vectorCount} vectors to ${fileName}`)
+      setStatusLine(`Exported ${payload.vectorCount} vectors as ${vectorExportFormat.toUpperCase()} to ${fileName}`)
       setMemoryStatus('Vector export complete')
     } catch (error) {
       const message = toErrorMessage(error)
@@ -1775,7 +1779,18 @@ function App() {
         >
           Analyze and merge vector memories
         </button>
-        <button onClick={exportVectorData} disabled={isStreaming || vectorMemoryCount === 0}>
+        <label htmlFor="vectorExportFormat">Vector export format</label>
+        <select
+          id="vectorExportFormat"
+          value={vectorExportFormat}
+          onChange={(event) => setVectorExportFormat(event.target.value as VectorExportFormat)}
+          disabled={isStreaming || vectorMemoryCount === 0}
+        >
+          <option value="geojson">GeoJSON</option>
+          <option value="kml">KML</option>
+          <option value="shapefile">Shapefile (.zip)</option>
+        </select>
+        <button onClick={() => void exportVectorData()} disabled={isStreaming || vectorMemoryCount === 0}>
           Export vector data
         </button>
         <button onClick={clearAllMemories} disabled={memoryGraph.facts.length === 0 || isStreaming}>

@@ -91,7 +91,7 @@ LMSTUDIO_TEST_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 - Stores facts, evidence, aliases, conflicts, and vector index.
 - Preserves contradictory facts and tracks active winner.
 - Supports file-ingested facts (`.txt`, `.md`, `.csv`) with provenance.
-- Supports exporting vector index data as JSON from the Brain panel.
+- Supports exporting vector index data as `GeoJSON`, `KML`, or `Shapefile (.zip)` from the Brain panel.
 
 ### Embeddings + Retrieval
 
