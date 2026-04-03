@@ -3,6 +3,7 @@ import type { VectorExportFormat } from '../lib/vectorExport'
 import { formatDateTime } from '../lib/dateFormatting'
 
 interface BrainSidebarProps {
+  canVisualizeVectors: boolean
   embeddingStatus: EmbeddingStatus
   episodeStatus: string
   fileDerivedFactCount: number
@@ -22,6 +23,7 @@ interface BrainSidebarProps {
   onClearFileFacts: () => void
   onDeleteFact: (factId: string, canonicalText: string) => void
   onExportVectorData: () => void
+  onOpenVectorVisualization: () => void
   onOpenDebug: () => void
   onRegenerateLastResponse: () => void
   onResolveConflictWinner: (conflictId: string, winnerFactId: string) => void
@@ -33,6 +35,7 @@ interface BrainSidebarProps {
 
 export const BrainSidebar = (props: BrainSidebarProps) => {
   const {
+    canVisualizeVectors,
     embeddingStatus,
     episodeStatus,
     evidenceByFactId,
@@ -52,6 +55,7 @@ export const BrainSidebar = (props: BrainSidebarProps) => {
     onClearFileFacts,
     onDeleteFact,
     onExportVectorData,
+    onOpenVectorVisualization,
     onOpenDebug,
     onRegenerateLastResponse,
     onResolveConflictWinner,
@@ -106,6 +110,13 @@ export const BrainSidebar = (props: BrainSidebarProps) => {
       </select>
       <button onClick={onExportVectorData} disabled={isStreaming || vectorMemoryCount === 0}>
         Export Vector Data
+      </button>
+      <button
+        onClick={onOpenVectorVisualization}
+        disabled={!canVisualizeVectors}
+        title={canVisualizeVectors ? 'Open vector visualization' : 'Need at least 2 vectors to visualize'}
+      >
+        Visualize Vectors
       </button>
       <button onClick={onClearAllMemories} disabled={memoryGraph.facts.length === 0 || isStreaming}>
         Clear All Memories

@@ -5,6 +5,7 @@ import { BrainSidebar } from './components/BrainSidebar'
 import { ChatWorkspace } from './components/ChatWorkspace'
 import { DebugDrawer } from './components/DebugDrawer'
 import { OptimizerPreviewModal } from './components/OptimizerPreviewModal'
+import { VectorVisualizationModal } from './components/VectorVisualizationModal'
 import { autoResizeTextarea, useAutoResizeTextarea } from './hooks/useAutoResizeTextarea'
 import {
   clearEpisodes,
@@ -159,6 +160,7 @@ function App() {
     result: SystemPromptOptimizationResult
   } | null>(null)
   const [debugOpen, setDebugOpen] = useState(false)
+  const [vectorVisualizationOpen, setVectorVisualizationOpen] = useState(false)
   const [debugEntries, setDebugEntries] = useState<BrainDebugEntry[]>([])
   const systemPromptRef = useRef<HTMLTextAreaElement>(null)
   const scenarioPromptRef = useRef<HTMLTextAreaElement>(null)
@@ -1729,6 +1731,7 @@ function App() {
       />
 
       <BrainSidebar
+        canVisualizeVectors={vectorMemoryCount >= 2}
         hasMessages={messages.length > 0}
         hasLastAssistantMessage={Boolean(lastAssistantMessage)}
         isStreaming={isStreaming}
@@ -1746,6 +1749,7 @@ function App() {
         onClearChat={clearChat}
         onRegenerateLastResponse={() => void regenerateLastResponse()}
         onOpenDebug={() => setDebugOpen(true)}
+        onOpenVectorVisualization={() => setVectorVisualizationOpen(true)}
         onRetryEmbeddings={() => void retryEmbeddings()}
         onRunAnalyzeAndMergeVectorMemories={() => void runAnalyzeAndMergeVectorMemories()}
         onVectorExportFormatChange={setVectorExportFormat}
@@ -1763,6 +1767,12 @@ function App() {
         debugEntries={debugEntries}
         onClear={() => setDebugEntries([])}
         onClose={() => setDebugOpen(false)}
+      />
+
+      <VectorVisualizationModal
+        graph={memoryGraph}
+        open={vectorVisualizationOpen}
+        onClose={() => setVectorVisualizationOpen(false)}
       />
 
       <OptimizerPreviewModal

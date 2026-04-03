@@ -33,7 +33,8 @@
     "dexie": "^4.4.2",
     "dexie-react-hooks": "^4.4.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "umap-js": "^1.4.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.9.1",

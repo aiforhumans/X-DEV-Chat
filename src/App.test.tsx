@@ -39,6 +39,9 @@ const mocks = vi.hoisted(() => ({
   mockFindRelevantEpisodes: vi.fn(),
   mockEnqueueEpisodeSummary: vi.fn(),
   mockRunProfileExtractionCycle: vi.fn(),
+  mockUmapFitAsync: vi.fn<
+    (vectors: number[][], callback?: (epochNumber: number) => boolean) => Promise<number[][]>
+  >(),
 }))
 
 const basePersistedState = {
@@ -65,6 +68,32 @@ const emptyGraph = {
   aliases: [],
   conflicts: [],
   vectorIndex: [],
+}
+
+const graphWithVectors = (count = 2) => {
+  const facts = Array.from({ length: count }, (_, index) => ({
+    id: `fact-${index + 1}`,
+    canonicalText: `Fact ${index + 1}`,
+    category: index % 2 === 0 ? 'preference' : 'goal',
+    status: 'active' as const,
+    confidence: 0.7,
+    sourceTags: ['chat'],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }))
+  return {
+    facts,
+    evidence: [],
+    aliases: [],
+    conflicts: [],
+    vectorIndex: facts.map((fact, index) => ({
+      factId: fact.id,
+      vector: [index + 1, index + 2, index + 3],
+      updatedAt: new Date().toISOString(),
+      provider: 'browser',
+      model: 'Xenova/all-MiniLM-L6-v2',
+    })),
+  }
 }
 
 vi.mock('./lib/lmStudioClient', () => ({
@@ -147,6 +176,14 @@ vi.mock('./lib/fileIngest', () => ({
   })),
 }))
 
+vi.mock('umap-js', () => ({
+  UMAP: class {
+    fitAsync(vectors: number[][], callback?: (epochNumber: number) => boolean): Promise<number[][]> {
+      return mocks.mockUmapFitAsync(vectors, callback)
+    }
+  },
+}))
+
 vi.mock('./lib/systemPromptOptimizer', () => ({
   optimizeSystemPrompt: mocks.mockOptimizeSystemPrompt,
   optimizeScenarioPrompt: mocks.mockOptimizeSystemPrompt,
@@ -217,6 +254,10 @@ describe('App', () => {
     })
     mocks.mockChat.mockResolvedValue({})
     mocks.mockEmbeddings.mockResolvedValue([[0.1, 0.2]])
+    mocks.mockUmapFitAsync.mockImplementation(async (vectors, callback) => {
+      callback?.(1)
+      return vectors.map((vector, index) => [index, vector[0] ?? 0])
+    })
 
     mocks.mockInitializeEmbeddings.mockResolvedValue('ready')
     mocks.mockProbeApiEmbeddings.mockResolvedValue()
@@ -334,6 +375,65 @@ describe('App', () => {
     fireEvent.click(fileButton)
 
     expect(inputClickSpy).toHaveBeenCalled()
+  })
+
+  it('disables vector visualization action when fewer than 2 vectors exist', async () => {
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const visualizeButton = screen.getByRole('button', { name: 'Visualize Vectors' })
+    expect(visualizeButton).toBeDisabled()
+    expect(visualizeButton).toHaveAttribute('title', 'Need at least 2 vectors to visualize')
+  })
+
+  it('opens and closes the vector visualization modal when vectors are available', async () => {
+    mocks.mockLoadMemoryGraph.mockResolvedValueOnce(graphWithVectors(2))
+
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const visualizeButton = screen.getByRole('button', { name: 'Visualize Vectors' })
+    await waitFor(() => expect(visualizeButton).not.toBeDisabled())
+    fireEvent.click(visualizeButton)
+
+    const dialog = await screen.findByRole('dialog', { name: 'Vector visualization' })
+    expect(within(dialog).getByText(/Showing 2 of 2 vectors/i)).toBeInTheDocument()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Vector visualization' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('supports vector visualization controls and reruns projection', async () => {
+    mocks.mockLoadMemoryGraph.mockResolvedValueOnce(graphWithVectors(3))
+
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const visualizeButton = screen.getByRole('button', { name: 'Visualize Vectors' })
+    await waitFor(() => expect(visualizeButton).not.toBeDisabled())
+    fireEvent.click(visualizeButton)
+
+    const dialog = await screen.findByRole('dialog', { name: 'Vector visualization' })
+    await screen.findByText('Projection ready. Click a point to inspect nearest links.')
+
+    const linksCheckbox = within(dialog).getByLabelText('Show nearest-neighbor links')
+    expect(linksCheckbox).toBeChecked()
+    fireEvent.click(linksCheckbox)
+    expect(linksCheckbox).not.toBeChecked()
+
+    const neighborSlider = within(dialog).getByLabelText(/Neighbor links \(k\):/i)
+    fireEvent.change(neighborSlider, { target: { value: '1' } })
+    expect((neighborSlider as HTMLInputElement).value).toBe('1')
+
+    const rerunButton = within(dialog).getByRole('button', { name: 'Re-run Projection' })
+    await waitFor(() => expect(rerunButton).not.toBeDisabled())
+    const callCountBefore = mocks.mockUmapFitAsync.mock.calls.length
+    fireEvent.click(rerunButton)
+    await waitFor(() => {
+      expect(mocks.mockUmapFitAsync.mock.calls.length).toBeGreaterThan(callCountBefore)
+    })
   })
 
   it('regenerates last response with fresh sampling options', async () => {

@@ -480,6 +480,161 @@ textarea {
   margin: 0;
 }
 
+.vectorviz-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, black 56%, transparent);
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: var(--space-2);
+}
+
+.vectorviz-modal {
+  width: min(1140px, 98vw);
+  max-height: 94dvh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2);
+  box-shadow: var(--shadow-elevated);
+  padding: var(--space-2);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.vectorviz-modal header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+
+.vectorviz-modal h2,
+.vectorviz-modal h3 {
+  margin: 0;
+}
+
+.vectorviz-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-1);
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-subtle);
+  padding: var(--space-1);
+}
+
+.vectorviz-controls label {
+  font-size: var(--font-sm);
+  color: var(--muted);
+}
+
+.vectorviz-controls input[type='range'] {
+  width: 100%;
+}
+
+.vectorviz-controls .vectorviz-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--ink);
+}
+
+.vectorviz-controls .vectorviz-checkbox input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+}
+
+.vectorviz-controls button {
+  justify-self: start;
+}
+
+.vectorviz-status {
+  min-height: 1.5rem;
+}
+
+.vectorviz-status p {
+  margin: 0;
+}
+
+.vectorviz-status .error {
+  margin-top: 0.3rem;
+}
+
+.vectorviz-chart-wrap {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-1);
+  background: var(--surface-subtle);
+  padding: var(--space-1);
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+}
+
+.vectorviz-chart {
+  width: 100%;
+  height: auto;
+  max-height: 58dvh;
+}
+
+.vectorviz-edge {
+  stroke: color-mix(in srgb, var(--line) 55%, var(--accent));
+  stroke-width: 1.25;
+  opacity: 0.8;
+}
+
+.vectorviz-point {
+  cursor: pointer;
+  stroke: color-mix(in srgb, var(--panel) 35%, black 65%);
+  stroke-width: 1;
+  transition: opacity 0.14s ease;
+}
+
+.vectorviz-point:hover {
+  opacity: 0.9;
+}
+
+.vectorviz-point.selected {
+  stroke: var(--ink);
+  stroke-width: 1.8;
+}
+
+.vectorviz-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 0.8rem;
+}
+
+.vectorviz-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  padding: 0.18rem 0.58rem;
+  font-size: var(--font-sm);
+}
+
+.vectorviz-legend-item i {
+  width: 0.72rem;
+  height: 0.72rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.vectorviz-detail {
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-1);
+  min-height: 3.2rem;
+}
+
+.vectorviz-detail p {
+  margin: 0;
+}
+
 .sr-only {
   border: 0;
   clip: rect(0 0 0 0);
@@ -573,6 +728,30 @@ textarea {
 
   .sidebar-right {
     border-left: none;
+  }
+
+  .vectorviz-modal {
+    width: min(100%, 920px);
+  }
+
+  .vectorviz-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .vectorviz-modal {
+    width: 100%;
+    max-height: 96dvh;
+    border-radius: var(--radius-1);
+  }
+
+  .vectorviz-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .vectorviz-chart-wrap {
+    min-height: 220px;
   }
 }
 
