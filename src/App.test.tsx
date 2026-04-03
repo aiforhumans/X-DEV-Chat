@@ -180,6 +180,11 @@ describe('App', () => {
         dispatchEvent: vi.fn(),
       })),
     })
+    Object.defineProperty(window, 'confirm', {
+      writable: true,
+      configurable: true,
+      value: vi.fn(() => true),
+    })
 
     mocks.mockListModels.mockResolvedValue([
       {
@@ -274,18 +279,61 @@ describe('App', () => {
 
     await screen.findByLabelText('Main LLM model')
 
-    const composer = screen.getByPlaceholderText('Message the local model...')
+    const composer = screen.getByLabelText('Message Composer')
     fireEvent.change(composer, { target: { value: 'hello' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     await screen.findByText('assistant reply')
     expect(mocks.mockStreamChat).toHaveBeenCalledTimes(1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear chat' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Chat' }))
     await screen.findByText('Start by loading a model and sending a message.')
     expect(mocks.mockSetEpisodeCursor).toHaveBeenCalledWith('default-session', 0)
     expect(mocks.mockResetProfileTurnCounter).toHaveBeenCalledWith('default-session')
     expect(mocks.mockClearEpisodes).toHaveBeenCalledWith('default-session')
+  })
+
+  it('sends a message with Enter from the composer keyboard shortcut', async () => {
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const composer = screen.getByLabelText('Message Composer')
+    fireEvent.change(composer, { target: { value: 'keyboard send' } })
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' })
+
+    await screen.findByText('assistant reply')
+    expect(mocks.mockStreamChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not clear chat if destructive confirmation is canceled', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    fireEvent.change(screen.getByLabelText('Message Composer'), { target: { value: 'keep this' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await screen.findByText('assistant reply')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear Chat' }))
+
+    expect(screen.getByText('assistant reply')).toBeInTheDocument()
+    expect(mocks.mockSetEpisodeCursor).not.toHaveBeenCalled()
+    expect(mocks.mockResetProfileTurnCounter).not.toHaveBeenCalled()
+    expect(mocks.mockClearEpisodes).not.toHaveBeenCalled()
+  })
+
+  it('uses a semantic file button to open the file picker', async () => {
+    const inputClickSpy = vi.spyOn(HTMLInputElement.prototype, 'click')
+
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    const fileButton = screen.getByRole('button', { name: /Add files for Brain ingest/i })
+    expect(fileButton.tagName).toBe('BUTTON')
+    fireEvent.click(fileButton)
+
+    expect(inputClickSpy).toHaveBeenCalled()
   })
 
   it('regenerates last response with fresh sampling options', async () => {
@@ -303,13 +351,13 @@ describe('App', () => {
     render(<App />)
     await screen.findByLabelText('Main LLM model')
 
-    fireEvent.change(screen.getByPlaceholderText('Message the local model...'), {
+    fireEvent.change(screen.getByLabelText('Message Composer'), {
       target: { value: 'hello' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await screen.findByText('first reply')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Regen last response' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Regen Last Response' }))
     await screen.findByText('regen reply')
 
     expect(mocks.mockStreamChat).toHaveBeenCalledTimes(2)
@@ -386,7 +434,7 @@ describe('App', () => {
     render(<App />)
     await screen.findByLabelText('Main LLM model')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry embeddings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry Embeddings' }))
 
     await screen.findByText((text) => text.includes('Embeddings failed:') && text.includes('api down'))
   })
@@ -397,7 +445,7 @@ describe('App', () => {
 
     expect(mocks.mockInitializeEmbeddings).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Retry embeddings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry Embeddings' }))
     await waitFor(() => {
       expect(mocks.mockInitializeEmbeddings).toHaveBeenCalledWith(true)
     })
@@ -493,8 +541,8 @@ describe('App', () => {
     render(<App />)
     await screen.findByLabelText('Main LLM model')
 
-    const exportButton = await screen.findByRole('button', { name: 'Export vector data' })
-    fireEvent.change(screen.getByLabelText('Vector export format'), { target: { value: 'kml' } })
+    const exportButton = await screen.findByRole('button', { name: 'Export Vector Data' })
+    fireEvent.change(screen.getByLabelText('Vector Export Format'), { target: { value: 'kml' } })
     expect(exportButton).not.toBeDisabled()
     fireEvent.click(exportButton)
 

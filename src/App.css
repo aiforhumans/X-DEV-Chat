@@ -1,34 +1,61 @@
-.app-shell {
-  width: calc(100vw - clamp(0.75rem, 1.4vw, 2rem));
-  margin: clamp(0.4rem, 0.8vw, 1rem) auto;
-  height: calc(100vh - clamp(0.75rem, 1.6vw, 2rem));
+.app-frame {
+  min-height: 100dvh;
+  padding:
+    max(0.75rem, env(safe-area-inset-top))
+    max(0.75rem, env(safe-area-inset-right))
+    max(0.75rem, env(safe-area-inset-bottom))
+    max(0.75rem, env(safe-area-inset-left));
   display: grid;
-  grid-template-columns: clamp(250px, 22vw, 390px) minmax(0, 1fr) clamp(190px, 16vw, 280px);
-  background: var(--panel);
+  gap: 0.75rem;
+}
+
+.mobile-panel-toggle {
+  display: none;
+}
+
+.app-shell {
+  width: min(100%, 1720px);
+  margin: 0 auto;
+  height: calc(100dvh - max(1.5rem, env(safe-area-inset-top) + env(safe-area-inset-bottom)));
+  min-height: 640px;
+  display: grid;
+  grid-template-columns: clamp(260px, 20vw, 360px) minmax(0, 1fr) clamp(250px, 20vw, 360px);
   border: 1px solid var(--line);
   border-radius: var(--radius-2);
   overflow: hidden;
+  background: var(--panel);
+  box-shadow: var(--shadow-elevated);
+}
+
+.panel {
+  min-height: 0;
 }
 
 .sidebar {
   padding: var(--space-2);
   border-right: 1px solid var(--line);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 85%, white), color-mix(in srgb, var(--panel) 88%, #f7d9bf));
+  background: var(--panel-muted);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  min-height: 0;
   overflow: auto;
+}
+
+.sidebar-right {
+  border-left: 1px solid var(--line);
+  border-right: none;
 }
 
 .sidebar h1 {
   font-size: var(--font-lg);
   margin: 0 0 var(--space-1);
+  letter-spacing: -0.01em;
 }
 
 .sidebar h2 {
-  font-size: clamp(0.95rem, 0.2vw + 0.9rem, 1.1rem);
-  margin: 0 0 var(--space-1);
+  font-size: clamp(0.95rem, 0.2vw + 0.9rem, 1.08rem);
+  margin: var(--space-2) 0 0;
+  letter-spacing: -0.01em;
 }
 
 .sidebar label,
@@ -44,11 +71,10 @@
 textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
-  padding: clamp(0.45rem, 0.25vw + 0.35rem, 0.7rem)
-    clamp(0.55rem, 0.35vw + 0.4rem, 0.85rem);
+  padding: 0.56rem 0.7rem;
   font: inherit;
   color: var(--ink);
-  background: color-mix(in srgb, var(--panel) 90%, black 10%);
+  background: var(--surface);
 }
 
 .sidebar input,
@@ -58,7 +84,7 @@ textarea {
 
 .sidebar-system {
   width: 100%;
-  min-height: clamp(88px, 10vh, 140px);
+  min-height: 100px;
   max-height: none;
   overflow: hidden;
   resize: none;
@@ -66,19 +92,19 @@ textarea {
 
 .button-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.45rem;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
 }
 
 .model-actions {
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .model-group {
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
   padding: var(--space-1);
-  background: color-mix(in srgb, var(--panel) 90%, black 10%);
+  background: var(--surface);
   display: grid;
   gap: var(--space-1);
 }
@@ -99,21 +125,28 @@ textarea {
 
 button {
   cursor: pointer;
-  background: color-mix(in srgb, var(--panel) 84%, white 16%);
+  background: var(--surface);
   color: var(--ink);
+  transition: border-color 0.18s ease, background-color 0.18s ease;
 }
 
 button:hover:not(:disabled) {
   border-color: var(--accent);
+  background: var(--surface-hover);
 }
 
 button:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
-.new-chat {
-  margin-top: auto;
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .connection.online {
@@ -128,28 +161,23 @@ button:disabled {
   display: grid;
   grid-template-rows: auto 1fr auto;
   min-height: 0;
-}
-
-.sidebar-right {
-  border-left: 1px solid var(--line);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 82%, white), color-mix(in srgb, var(--panel) 90%, #b7d8ff));
-  border-right: none;
-  justify-content: flex-start;
-  min-height: 0;
-  overflow: hidden;
+  background: var(--panel);
 }
 
 .status-bar {
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  font-size: clamp(0.82rem, 0.15vw + 0.78rem, 0.95rem);
+  display: grid;
+  gap: 0.35rem;
+  font-size: var(--font-sm);
+}
+
+.status-line {
+  margin: 0;
 }
 
 .status-bar .error {
+  margin: 0;
   color: var(--warn);
 }
 
@@ -160,6 +188,7 @@ button:disabled {
   flex-direction: column;
   gap: var(--space-2);
   min-height: 0;
+  background: var(--panel);
 }
 
 .empty {
@@ -170,20 +199,20 @@ button:disabled {
   padding: var(--space-2);
   border-radius: var(--radius-1);
   border: 1px solid var(--line);
-  max-width: min(92%, 90ch);
+  max-width: min(92%, 86ch);
+  background: var(--surface);
   animation: fade-up 0.2s ease-out;
 }
 
 .bubble.user {
   align-self: flex-end;
-  background: color-mix(in srgb, var(--panel) 80%, #f2b794);
-  border-color: color-mix(in srgb, var(--line) 45%, #f0b08a);
+  border-color: color-mix(in srgb, var(--line) 72%, var(--accent));
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent) 8%);
 }
 
 .bubble.assistant {
   align-self: flex-start;
-  background: color-mix(in srgb, var(--panel) 76%, #87bff2);
-  border-color: color-mix(in srgb, var(--line) 50%, #8fc4f3);
+  background: var(--surface);
 }
 
 .bubble header {
@@ -197,7 +226,7 @@ button:disabled {
 .bubble p {
   margin: 0;
   white-space: pre-wrap;
-  line-height: 1.45;
+  line-height: 1.48;
 }
 
 details {
@@ -206,18 +235,18 @@ details {
 
 details summary {
   cursor: pointer;
-  color: var(--accent-strong);
-  font-size: 0.85rem;
+  color: var(--accent);
+  font-size: var(--font-sm);
 }
 
 details pre {
   margin: 0.5rem 0 0;
   padding: 0.65rem;
-  background: color-mix(in srgb, var(--panel) 90%, black 10%);
+  background: var(--surface-subtle);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-1);
   white-space: pre-wrap;
-  font-size: 0.84rem;
+  font-size: var(--font-sm);
 }
 
 .composer {
@@ -225,19 +254,21 @@ details pre {
   padding: var(--space-2);
   display: grid;
   gap: var(--space-1);
+  background: var(--panel-muted);
 }
 
 .drop-zone {
   border: 1px dashed var(--line);
   border-radius: var(--radius-1);
-  padding: 0.7rem;
-  cursor: pointer;
-  background: color-mix(in srgb, var(--panel) 90%, black 10%);
+  padding: 0.8rem;
+  text-align: left;
+  background: var(--surface-subtle);
+  color: var(--ink);
 }
 
 .drop-zone.active {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--panel) 80%, #8fc4f3);
+  background: color-mix(in srgb, var(--surface-subtle) 88%, var(--accent) 12%);
 }
 
 .drop-zone strong {
@@ -260,25 +291,15 @@ details pre {
 textarea {
   width: 100%;
   resize: vertical;
-  min-height: clamp(84px, 12vh, 160px);
-  max-height: clamp(220px, 42vh, 520px);
+  min-height: clamp(88px, 12vh, 170px);
+  max-height: clamp(210px, 36vh, 440px);
+  background: var(--surface);
 }
 
 .composer-actions {
   display: flex;
   gap: 0.5rem;
   justify-content: flex-end;
-}
-
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 
 .theme-row {
@@ -312,7 +333,7 @@ textarea {
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
   padding: var(--space-1);
-  background: color-mix(in srgb, var(--panel) 86%, black 14%);
+  background: var(--surface);
 }
 
 .memory-item header {
@@ -326,7 +347,7 @@ textarea {
 .memory-item p {
   margin: 0 0 var(--space-1);
   font-size: var(--font-sm);
-  line-height: 1.35;
+  line-height: 1.38;
   word-break: break-word;
 }
 
@@ -336,6 +357,7 @@ textarea {
 
 .memory-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-1);
   margin-bottom: var(--space-1);
 }
@@ -357,9 +379,9 @@ textarea {
   position: fixed;
   top: 0;
   right: 0;
-  height: 100vh;
-  width: min(520px, 92vw);
-  background: color-mix(in srgb, var(--panel) 88%, black 12%);
+  height: 100dvh;
+  width: min(520px, 94vw);
+  background: var(--panel);
   border-left: 1px solid var(--line);
   transform: translateX(100%);
   transition: transform 0.24s ease;
@@ -399,14 +421,14 @@ textarea {
   padding: var(--space-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--panel) 84%, black 16%);
+  background: var(--surface-subtle);
   font-size: var(--font-sm);
 }
 
 .optimizer-overlay {
   position: fixed;
   inset: 0;
-  background: color-mix(in srgb, black 44%, transparent);
+  background: color-mix(in srgb, black 52%, transparent);
   z-index: 80;
   display: grid;
   place-items: center;
@@ -415,9 +437,9 @@ textarea {
 
 .optimizer-modal {
   width: min(920px, 96vw);
-  max-height: 90vh;
+  max-height: 90dvh;
   overflow: auto;
-  background: color-mix(in srgb, var(--panel) 94%, black 6%);
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-2);
   padding: var(--space-2);
@@ -448,8 +470,8 @@ textarea {
   padding: var(--space-1);
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
-  background: color-mix(in srgb, var(--panel) 90%, black 10%);
-  max-height: 28vh;
+  background: var(--surface-subtle);
+  max-height: 28dvh;
   overflow: auto;
   font-size: var(--font-sm);
 }
@@ -458,34 +480,117 @@ textarea {
   margin: 0;
 }
 
-@media (max-width: 900px) {
+.sr-only {
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  padding: 0;
+  position: absolute;
+  width: 1px;
+  white-space: nowrap;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1280px) {
+  .app-shell {
+    grid-template-columns: clamp(240px, 26vw, 300px) minmax(0, 1fr) clamp(220px, 24vw, 300px);
+  }
+
+  .timeline {
+    padding-inline: var(--space-2);
+  }
+}
+
+@media (max-width: 980px) {
+  .app-frame {
+    padding:
+      max(0.5rem, env(safe-area-inset-top))
+      max(0.5rem, env(safe-area-inset-right))
+      max(0.5rem, env(safe-area-inset-bottom))
+      max(0.5rem, env(safe-area-inset-left));
+  }
+
+  .mobile-panel-toggle {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.4rem;
+    width: min(100%, 1720px);
+    margin: 0 auto;
+  }
+
+  .mobile-panel-toggle button {
+    font-size: var(--font-sm);
+    background: var(--surface);
+  }
+
+  .mobile-panel-toggle button.active {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--surface) 85%, var(--accent) 15%);
+  }
+
   .app-shell {
     width: 100%;
-    height: 100vh;
-    margin: 0;
-    border-radius: 0;
+    height: calc(100dvh - max(1rem, env(safe-area-inset-top) + env(safe-area-inset-bottom)) - 3.4rem);
+    min-height: 0;
+    border-radius: var(--radius-1);
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr auto;
+    grid-template-rows: 1fr;
+  }
+
+  .panel {
+    display: none;
+    min-height: 0;
+  }
+
+  .app-shell[data-mobile-panel='settings'] .panel-settings {
+    display: flex;
+  }
+
+  .app-shell[data-mobile-panel='chat'] .panel-chat {
+    display: grid;
+  }
+
+  .app-shell[data-mobile-panel='brain'] .panel-brain {
+    display: flex;
   }
 
   .sidebar {
     border-right: none;
-    border-bottom: 1px solid var(--line);
   }
 
   .sidebar-right {
     border-left: none;
-    border-top: 1px solid var(--line);
-    border-bottom: none;
   }
 }
 
-@media (min-width: 1800px) {
-  .app-shell {
-    grid-template-columns: clamp(290px, 20vw, 430px) minmax(0, 1fr) clamp(220px, 14vw, 320px);
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 
-  .timeline {
-    padding-inline: clamp(1.3rem, 2.2vw, 2.4rem);
+  .bubble {
+    animation: none;
+  }
+
+  .debug-drawer {
+    transition: none;
   }
 }

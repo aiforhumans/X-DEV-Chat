@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { DragEvent, FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
 import './App.css'
-import { ChatTimeline } from './components/ChatTimeline'
+import { BrainSidebar } from './components/BrainSidebar'
+import { ChatWorkspace } from './components/ChatWorkspace'
 import { DebugDrawer } from './components/DebugDrawer'
 import { OptimizerPreviewModal } from './components/OptimizerPreviewModal'
 import { autoResizeTextarea, useAutoResizeTextarea } from './hooks/useAutoResizeTextarea'
@@ -62,6 +63,7 @@ import {
   buildVectorExportPayload,
   type VectorExportFormat,
 } from './lib/vectorExport'
+import { formatDateTime } from './lib/dateFormatting'
 import type {
   ChatMessage,
   EmbeddingStatus,
@@ -77,6 +79,7 @@ import type { BrainDebugEntry } from './types/debug'
 
 const uid = (): string => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 const DEFAULT_MEMORY_MODEL_ID = 'liquid/lfm2.5-1.2b'
+type MobilePanel = 'settings' | 'chat' | 'brain'
 
 const toErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : 'Something went wrong'
@@ -140,7 +143,7 @@ function App() {
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus>('idle')
   const [vectorExportFormat, setVectorExportFormat] = useState<VectorExportFormat>('geojson')
   const [fileJobs, setFileJobs] = useState<FileIngestJob[]>([])
-  const [dragActive, setDragActive] = useState(false)
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>('chat')
   const [episodeStatus, setEpisodeStatus] = useState('Idle')
   const [profileStatus, setProfileStatus] = useState('Idle')
   const [optimizerStatus, setOptimizerStatus] = useState<'idle' | 'optimizing' | 'ready' | 'failed'>('idle')
@@ -157,7 +160,6 @@ function App() {
   } | null>(null)
   const [debugOpen, setDebugOpen] = useState(false)
   const [debugEntries, setDebugEntries] = useState<BrainDebugEntry[]>([])
-  const fileInputRef = useRef<HTMLInputElement>(null)
   const systemPromptRef = useRef<HTMLTextAreaElement>(null)
   const scenarioPromptRef = useRef<HTMLTextAreaElement>(null)
   const personaTextRef = useRef<HTMLTextAreaElement>(null)
@@ -808,7 +810,14 @@ function App() {
     }
   }
 
+  const confirmDestructiveAction = (message: string): boolean => {
+    if (typeof window === 'undefined') return true
+    return window.confirm(message)
+  }
+
   const clearChat = (): void => {
+    const accepted = confirmDestructiveAction('Clear the current chat history? This cannot be undone.')
+    if (!accepted) return
     setMessages([])
     setLastResponseId(null)
     setLastFailedPrompt(null)
@@ -866,21 +875,30 @@ function App() {
     })
   }
 
-  const removeFact = (factId: string): void => {
+  const removeFact = (factId: string, canonicalText: string): void => {
+    const previewText = canonicalText.length > 80 ? `${canonicalText.slice(0, 80)}…` : canonicalText
+    const accepted = confirmDestructiveAction(`Delete this memory fact?\n\n"${previewText}"`)
+    if (!accepted) return
     setMemoryGraph((current) => deleteFact(current, factId))
   }
 
   const clearAllMemories = (): void => {
+    const accepted = confirmDestructiveAction('Clear all stored memories? This cannot be undone.')
+    if (!accepted) return
     setMemoryGraph(clearMemoryGraph())
     setMemoryStatus('Idle')
   }
 
   const resolveConflictWinner = (conflictId: string, winnerFactId: string): void => {
+    const accepted = confirmDestructiveAction('Apply this conflict winner selection?')
+    if (!accepted) return
     setMemoryGraph((current) => resolveConflict(current, conflictId, winnerFactId))
     setMemoryStatus('Merged')
   }
 
   const clearFileDerivedFacts = (): void => {
+    const accepted = confirmDestructiveAction('Clear all file-derived memory facts?')
+    if (!accepted) return
     setMemoryGraph((current) => clearFileFacts(current))
     setMemoryStatus('File-derived memories cleared')
     pushDebug({
@@ -1143,22 +1161,6 @@ function App() {
     }
   }
 
-  const onDropZoneDragOver = (event: DragEvent<HTMLDivElement>): void => {
-    event.preventDefault()
-    setDragActive(true)
-  }
-
-  const onDropZoneDragLeave = (event: DragEvent<HTMLDivElement>): void => {
-    event.preventDefault()
-    setDragActive(false)
-  }
-
-  const onDropZoneDrop = (event: DragEvent<HTMLDivElement>): void => {
-    event.preventDefault()
-    setDragActive(false)
-    void handleFileList(event.dataTransfer.files)
-  }
-
   const onSidebarTextareaInput = (event: FormEvent<HTMLTextAreaElement>): void => {
     autoResizeTextarea(event.currentTarget)
   }
@@ -1368,6 +1370,13 @@ function App() {
     }))
   }
 
+  const handleEvidenceToggle = (factId: string, open: boolean): void => {
+    setShowEvidenceByFactId((current) => ({
+      ...current,
+      [factId]: open,
+    }))
+  }
+
   const acceptOptimizerPreview = (preview: NonNullable<typeof optimizerPreview>): void => {
     if (preview.target === 'persona') {
       setPersonaMode((current) => ({
@@ -1403,9 +1412,36 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <h1>LM Studio Chat</h1>
+    <div className="app-frame">
+      <nav className="mobile-panel-toggle" aria-label="Panel Navigation">
+        <button
+          type="button"
+          className={mobilePanel === 'settings' ? 'active' : ''}
+          onClick={() => setMobilePanel('settings')}
+          aria-pressed={mobilePanel === 'settings'}
+        >
+          Settings
+        </button>
+        <button
+          type="button"
+          className={mobilePanel === 'chat' ? 'active' : ''}
+          onClick={() => setMobilePanel('chat')}
+          aria-pressed={mobilePanel === 'chat'}
+        >
+          Chat
+        </button>
+        <button
+          type="button"
+          className={mobilePanel === 'brain' ? 'active' : ''}
+          onClick={() => setMobilePanel('brain')}
+          aria-pressed={mobilePanel === 'brain'}
+        >
+          Brain
+        </button>
+      </nav>
+      <div className="app-shell" data-mobile-panel={mobilePanel}>
+      <aside className="sidebar panel panel-settings">
+        <h1>LM Studio Workspace</h1>
         <div className="theme-row">
           <span>Theme</span>
           <button
@@ -1413,7 +1449,7 @@ function App() {
             onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
             type="button"
           >
-            {theme === 'light' ? 'Dark mode' : 'Light mode'}
+            {theme === 'light' ? 'Dark Mode' : 'Light Mode'}
           </button>
         </div>
         <label htmlFor="baseUrl">LM Studio URL</label>
@@ -1452,7 +1488,7 @@ function App() {
             onChange={(event) => setSelectedModel(event.target.value)}
             disabled={isStreaming || chatModels.length === 0}
           >
-            <option value="">Select main model...</option>
+            <option value="">Select Main Model…</option>
             {chatModels.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.id}
@@ -1476,7 +1512,7 @@ function App() {
             onChange={(event) => setSelectedBrainModel(event.target.value)}
             disabled={isStreaming || brainOptions.length === 0}
           >
-            <option value="">Select brain model...</option>
+            <option value="">Select Brain Model…</option>
             {brainOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.id}
@@ -1506,7 +1542,7 @@ function App() {
             onChange={(event) => setSelectedEmbedModel(event.target.value)}
             disabled={isStreaming || embeddingOptions.length === 0}
           >
-            <option value="">Select embedding model...</option>
+            <option value="">Select Embedding Model…</option>
             {embeddingOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.id}
@@ -1540,7 +1576,7 @@ function App() {
             value={systemPrompt}
             onChange={(event) => setSystemPrompt(event.target.value)}
             onInput={onSidebarTextareaInput}
-            placeholder="You are a helpful local assistant..."
+            placeholder="You are a helpful local assistant…"
             disabled={isStreaming}
           />
           <div className="system-tools">
@@ -1560,7 +1596,7 @@ function App() {
           </div>
           {lastOptimizationMeta ? (
             <p className="memory-meta">
-              Last optimized: {new Date(lastOptimizationMeta.at).toLocaleString()} ({lastOptimizationMeta.model})
+              Last optimized: {formatDateTime(lastOptimizationMeta.at)} ({lastOptimizationMeta.model})
             </p>
           ) : null}
         </details>
@@ -1580,7 +1616,7 @@ function App() {
             }
             disabled={isStreaming}
           >
-            {personaMode.enabled ? 'Disable roleplay' : 'Enable roleplay'}
+            {personaMode.enabled ? 'Disable Roleplay' : 'Enable Roleplay'}
           </button>
           <label htmlFor="personaIntensity">Roleplay intensity</label>
           <input
@@ -1613,7 +1649,7 @@ function App() {
               }))
             }
             onInput={onSidebarTextareaInput}
-            placeholder="Example: A warm, witty friend who talks naturally and asks thoughtful follow-ups."
+            placeholder="Example: A warm, witty friend who talks naturally and asks thoughtful follow-ups…"
             disabled={isStreaming}
           />
           <div className="system-tools">
@@ -1643,7 +1679,7 @@ function App() {
             value={scenarioPrompt}
             onChange={(event) => setScenarioPrompt(event.target.value)}
             onInput={onSidebarTextareaInput}
-            placeholder="Example: You are helping with a noir detective roleplay set in 1940s Chicago."
+            placeholder="Example: You are helping with a noir detective roleplay set in 1940s Chicago…"
             disabled={isStreaming}
           />
           <div className="system-tools">
@@ -1674,205 +1710,53 @@ function App() {
         <p className="memory-meta">Embed model: {selectedEmbedModel || 'none'}</p>
       </aside>
 
-      <main className="chat-panel">
-        <div className="status-bar">
-          <span>{statusLine}</span>
-          {errorBanner ? <span className="error">{errorBanner}</span> : null}
-        </div>
+      <ChatWorkspace
+        statusLine={statusLine}
+        errorBanner={errorBanner}
+        messages={messages}
+        showReasoningById={showReasoningById}
+        onToggleReasoning={handleReasoningToggle}
+        fileJobs={fileJobs}
+        input={input}
+        isStreaming={isStreaming}
+        selectedModel={selectedModel}
+        lastFailedPrompt={lastFailedPrompt}
+        onComposerInputChange={setInput}
+        onComposerKeyDown={onComposerKeyDown}
+        onFileList={(files) => void handleFileList(files)}
+        onRetryLastFailedPrompt={() => void sendMessage(lastFailedPrompt || '')}
+        onSend={() => void sendMessage()}
+      />
 
-        <ChatTimeline
-          messages={messages}
-          showReasoningById={showReasoningById}
-          onToggleReasoning={handleReasoningToggle}
-        />
-
-        <section className="composer">
-          <div
-            className={`drop-zone ${dragActive ? 'active' : ''}`}
-            onDragOver={onDropZoneDragOver}
-            onDragLeave={onDropZoneDragLeave}
-            onDrop={onDropZoneDrop}
-            onClick={() => fileInputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' || event.key === ' ') {
-                event.preventDefault()
-                fileInputRef.current?.click()
-              }
-            }}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt,.md,.csv"
-              multiple
-              hidden
-              onChange={(event) => {
-                if (event.target.files) {
-                  void handleFileList(event.target.files)
-                  event.target.value = ''
-                }
-              }}
-            />
-            <strong>Drop files for Brain ingest</strong>
-            <p>.txt, .md, .csv | up to 5 files, 2MB each</p>
-          </div>
-          {fileJobs.length > 0 ? (
-            <div className="file-jobs">
-              {fileJobs.slice(0, 5).map((job) => (
-                <p key={job.id} className="memory-meta">
-                  {job.fileName}: {job.status} ({job.processedChunks}/{job.totalChunks})
-                  {job.error ? ` - ${job.error}` : ''}
-                </p>
-              ))}
-            </div>
-          ) : null}
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={onComposerKeyDown}
-            placeholder="Message the local model..."
-            disabled={isStreaming}
-          />
-          <div className="composer-actions">
-            <button onClick={() => void sendMessage()} disabled={isStreaming || !input.trim() || !selectedModel}>
-              Send
-            </button>
-            {lastFailedPrompt ? (
-              <button onClick={() => void sendMessage(lastFailedPrompt)} disabled={isStreaming || !selectedModel}>
-                Retry Last Failed Prompt
-              </button>
-            ) : null}
-          </div>
-        </section>
-      </main>
-
-      <aside className="sidebar sidebar-right">
-        <h2>Actions</h2>
-        <button onClick={clearChat} disabled={isStreaming || messages.length === 0}>
-          Clear chat
-        </button>
-        <button
-          onClick={() => void regenerateLastResponse()}
-          disabled={isStreaming || !selectedModel || !lastAssistantMessage}
-        >
-          Regen last response
-        </button>
-        <button onClick={() => setDebugOpen(true)} disabled={false}>
-          Brain debug
-        </button>
-
-        <h2>Brain v2</h2>
-        <p className="memory-status">{memoryStatus}</p>
-        <p className="memory-meta">Episodes: {episodeStatus}</p>
-        <p className="memory-meta">User profile: {profileStatus}</p>
-        <p className="memory-meta">Embeddings: {embeddingStatus}</p>
-        <p className="memory-meta">Vector memories: {vectorMemoryCount}</p>
-        <p className="memory-meta">File-derived facts: {fileDerivedFactCount}</p>
-        <button onClick={() => void retryEmbeddings()} disabled={isStreaming || embeddingStatus === 'loading'}>
-          Retry embeddings
-        </button>
-        <button
-          onClick={() => void runAnalyzeAndMergeVectorMemories()}
-          disabled={isStreaming || embeddingStatus === 'loading' || memoryGraph.facts.length < 2}
-        >
-          Analyze and merge vector memories
-        </button>
-        <label htmlFor="vectorExportFormat">Vector export format</label>
-        <select
-          id="vectorExportFormat"
-          value={vectorExportFormat}
-          onChange={(event) => setVectorExportFormat(event.target.value as VectorExportFormat)}
-          disabled={isStreaming || vectorMemoryCount === 0}
-        >
-          <option value="geojson">GeoJSON</option>
-          <option value="kml">KML</option>
-          <option value="shapefile">Shapefile (.zip)</option>
-        </select>
-        <button onClick={() => void exportVectorData()} disabled={isStreaming || vectorMemoryCount === 0}>
-          Export vector data
-        </button>
-        <button onClick={clearAllMemories} disabled={memoryGraph.facts.length === 0 || isStreaming}>
-          Clear all memories
-        </button>
-        <button onClick={clearFileDerivedFacts} disabled={fileDerivedFactCount === 0 || isStreaming}>
-          Clear file facts
-        </button>
-        <div className="memory-list" role="list">
-          {sortedFacts.length === 0 ? <p className="empty">No stored facts yet.</p> : null}
-          {sortedFacts.map((fact) => {
-            const evidence = evidenceByFactId.get(fact.id) ?? []
-            const open = Boolean(showEvidenceByFactId[fact.id])
-            return (
-              <article key={fact.id} className="memory-item" role="listitem">
-                <header>
-                  <strong>{fact.category}</strong>
-                  <span>{fact.status}</span>
-                </header>
-                <p>{fact.canonicalText}</p>
-                <p className="memory-meta">
-                  {Math.round(fact.confidence * 100)}% | {evidence.length} evidence |{' '}
-                  {new Date(fact.updatedAt).toLocaleString()} | sources: {fact.sourceTags.join(',')}
-                </p>
-                <div className="memory-actions">
-                  <button
-                    onClick={() =>
-                      setShowEvidenceByFactId((current) => ({
-                        ...current,
-                        [fact.id]: !open,
-                      }))
-                    }
-                    disabled={isStreaming}
-                  >
-                    {open ? 'Hide evidence' : 'Show evidence'}
-                  </button>
-                  <button onClick={() => removeFact(fact.id)} disabled={isStreaming}>
-                    Delete
-                  </button>
-                </div>
-                {open ? (
-                  <ul className="evidence-list">
-                    {evidence.length === 0 ? <li>No evidence yet.</li> : null}
-                    {evidence.map((entry) => (
-                      <li key={entry.id}>
-                        <span>{Math.round(entry.confidence * 100)}%</span> {entry.verbatim}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </article>
-            )
-          })}
-
-          {memoryGraph.conflicts.length > 0 ? <h3 className="conflict-title">Conflicts</h3> : null}
-          {memoryGraph.conflicts.map((conflict) => {
-            const factA = memoryGraph.facts.find((fact) => fact.id === conflict.factAId)
-            const factB = memoryGraph.facts.find((fact) => fact.id === conflict.factBId)
-            if (!factA || !factB) return null
-
-            return (
-              <article key={conflict.id} className="memory-item">
-                <header>
-                  <strong>Conflict</strong>
-                  <span>{conflict.resolvedManually ? 'manual' : 'auto'}</span>
-                </header>
-                <p>{factA.canonicalText}</p>
-                <p>{factB.canonicalText}</p>
-                <p className="memory-meta">Winner: {conflict.winnerFactId === factA.id ? 'A' : 'B'}</p>
-                <div className="memory-actions">
-                  <button onClick={() => resolveConflictWinner(conflict.id, factA.id)} disabled={isStreaming}>
-                    Set A winner
-                  </button>
-                  <button onClick={() => resolveConflictWinner(conflict.id, factB.id)} disabled={isStreaming}>
-                    Set B winner
-                  </button>
-                </div>
-              </article>
-            )
-          })}
-        </div>
-      </aside>
+      <BrainSidebar
+        hasMessages={messages.length > 0}
+        hasLastAssistantMessage={Boolean(lastAssistantMessage)}
+        isStreaming={isStreaming}
+        memoryStatus={memoryStatus}
+        episodeStatus={episodeStatus}
+        profileStatus={profileStatus}
+        embeddingStatus={embeddingStatus}
+        vectorMemoryCount={vectorMemoryCount}
+        fileDerivedFactCount={fileDerivedFactCount}
+        vectorExportFormat={vectorExportFormat}
+        memoryGraph={memoryGraph}
+        sortedFacts={sortedFacts}
+        evidenceByFactId={evidenceByFactId}
+        showEvidenceByFactId={showEvidenceByFactId}
+        onClearChat={clearChat}
+        onRegenerateLastResponse={() => void regenerateLastResponse()}
+        onOpenDebug={() => setDebugOpen(true)}
+        onRetryEmbeddings={() => void retryEmbeddings()}
+        onRunAnalyzeAndMergeVectorMemories={() => void runAnalyzeAndMergeVectorMemories()}
+        onVectorExportFormatChange={setVectorExportFormat}
+        onExportVectorData={() => void exportVectorData()}
+        onClearAllMemories={clearAllMemories}
+        onClearFileFacts={clearFileDerivedFacts}
+        onToggleEvidence={handleEvidenceToggle}
+        onDeleteFact={removeFact}
+        onResolveConflictWinner={resolveConflictWinner}
+      />
+      </div>
 
       <DebugDrawer
         debugOpen={debugOpen}

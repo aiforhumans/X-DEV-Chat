@@ -1,4 +1,5 @@
 import type { BrainDebugEntry } from '../types/debug'
+import { formatTime } from '../lib/dateFormatting'
 
 interface DebugDrawerProps {
   debugOpen: boolean
@@ -30,7 +31,7 @@ export const DebugDrawer = (props: DebugDrawerProps) => {
               <span>{entry.status}</span>
             </header>
             <p className="memory-meta">
-              {new Date(entry.at).toLocaleTimeString()} | model: {entry.model}
+              {formatTime(entry.at)} | model: {entry.model}
             </p>
             {entry.prompt ? (
               <p>
@@ -60,7 +61,7 @@ export const DebugDrawer = (props: DebugDrawerProps) => {
             </p>
             {entry.error ? <p className="error">{entry.error}</p> : null}
             <details>
-              <summary>Raw response</summary>
+              <summary>Raw Response</summary>
               <pre>{entry.raw || '[empty]'}</pre>
             </details>
           </article>
