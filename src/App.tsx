@@ -1,0 +1,1956 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { DragEvent, FormEvent, KeyboardEvent } from 'react'
+import './App.css'
+import {
+  DEFAULT_SESSION_ID,
+  loadMemoryGraph,
+  loadMessages,
+  migrateLocalStateToDexieOnce,
+  saveMemoryGraph,
+  saveMessages,
+} from './db/database'
+import { applyStreamEvent, extractResponseId, initialAccumulator } from './lib/chatStream'
+import {
+  createMemoryQueue,
+  enqueueEpisodeSummary,
+  findRelevantEpisodes,
+  runProfileExtractionCycle,
+  WORKING_MEMORY_LIMIT,
+} from './lib/episodicMemory'
+import { ingestDroppedFiles } from './lib/fileIngest'
+import {
+  buildEpisodicContextBlock,
+  buildWorkingMemoryInput,
+  extractUserFactsNlFirst,
+} from './lib/memoryIntelligence'
+import { LmStudioClient } from './lib/lmStudioClient'
+import {
+  analyzeAndMergeVectorMemories,
+  buildMemoryContext,
+  clearFileFacts,
+  clearMemoryGraph,
+  deleteFact,
+  mergeHybridCandidates,
+  mergeFactsWithConflicts,
+  prefilterFacts,
+  RECALL_LIMIT,
+  rerankFactsWithModel,
+  resolveConflict,
+} from './lib/memoryGraph'
+import { buildPersonaPrompt, composeSystemPrompt, defaultPersonaMode } from './lib/personaMode'
+import { DEFAULT_BASE_URL, loadPersistedState, loadUiState, saveUiState } from './lib/persistence'
+import { getOptimizerSystemPrompt } from './lib/optimizerConfig'
+import {
+  getEmbeddingError,
+  getLmStudioEmbeddingModel,
+  getEmbeddingStatus,
+  initializeEmbeddings,
+  probeApiEmbeddings,
+  setLmStudioEmbeddingModel,
+  semanticPrefilterFacts,
+} from './lib/semanticSearch'
+import { optimizeCustomPersona, optimizeScenarioPrompt, optimizeSystemPrompt } from './lib/systemPromptOptimizer'
+import type {
+  ChatMessage,
+  EmbeddingStatus,
+  FileIngestJob,
+  MemoryFact,
+  MemoryGraphState,
+  ModelInfo,
+  PersonaModeState,
+  StreamEvent,
+  SystemPromptOptimizationResult,
+} from './types/chat'
+
+const uid = (): string => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+const DEFAULT_MEMORY_MODEL_ID = 'liquid/lfm2.5-1.2b'
+
+const toErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : 'Something went wrong'
+
+interface BrainDebugEntry {
+  id: string
+  kind: 'extract' | 'rerank' | 'optimize' | 'embed' | 'file' | 'episode-summary' | 'profile-extract'
+  at: string
+  model: string
+  status: string
+  prompt?: string
+  shortlistCount?: number
+  selectedCount?: number
+  raw: string
+  parsePath?: string
+  optimizeTarget?: 'system' | 'persona' | 'scenario'
+  optimizerSystemPromptUsed?: string
+  chatSystemMessageSnapshot?: string
+  embeddingStatus?: EmbeddingStatus
+  error?: string
+  personaEnabled?: boolean
+  personaIntensity?: number
+  personaBlockLength?: number
+}
+
+const emptyGraph = (): MemoryGraphState => ({
+  facts: [],
+  evidence: [],
+  aliases: [],
+  conflicts: [],
+  vectorIndex: [],
+})
+
+const isModelLoaded = (model: ModelInfo): boolean =>
+  Boolean(model.loaded) || (Array.isArray(model.loaded_instances) && model.loaded_instances.length > 0)
+
+const isEmbeddingModel = (model: ModelInfo): boolean => {
+  if (model.type === 'embedding') return true
+  const id = `${model.id || ''} ${model.key || ''}`.toLowerCase()
+  return id.includes('embedding') || id.includes('embed')
+}
+
+const autoResizeTextarea = (element: HTMLTextAreaElement | null): void => {
+  if (!element) return
+  element.style.height = 'auto'
+  element.style.height = `${element.scrollHeight}px`
+}
+
+function App() {
+  const legacyPersistedSnapshot = useMemo(() => loadPersistedState(), [])
+  const persisted = useMemo(() => loadUiState(), [])
+  const initialTheme = useMemo<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'light'
+    const stored = localStorage.getItem('lmstudio-theme')
+    if (stored === 'light' || stored === 'dark') return stored
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  }, [])
+  const [baseUrl, setBaseUrl] = useState<string>(persisted.baseUrl || DEFAULT_BASE_URL)
+  const [selectedModel, setSelectedModel] = useState<string>(persisted.selectedModel)
+  const [selectedBrainModel, setSelectedBrainModel] = useState<string>(
+    persisted.brainModel || DEFAULT_MEMORY_MODEL_ID,
+  )
+  const [selectedEmbedModel, setSelectedEmbedModel] = useState<string>(
+    persisted.embedModel || getLmStudioEmbeddingModel(),
+  )
+  const [systemPrompt, setSystemPrompt] = useState<string>(persisted.systemPrompt || '')
+  const [scenarioPrompt, setScenarioPrompt] = useState<string>(persisted.scenarioPrompt || '')
+  const [lastOptimizationMeta, setLastOptimizationMeta] = useState<{ at: string; model: string } | undefined>(
+    persisted.lastOptimizationMeta,
+  )
+  const [personaMode, setPersonaMode] = useState<PersonaModeState>(persisted.personaMode ?? defaultPersonaMode())
+  const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme)
+  const [models, setModels] = useState<ModelInfo[]>([])
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [memoryGraph, setMemoryGraph] = useState<MemoryGraphState>(emptyGraph())
+  const [lastResponseId, setLastResponseId] = useState<string | null>(persisted.lastResponseId)
+  const [lastFailedPrompt, setLastFailedPrompt] = useState<string | null>(persisted.lastFailedPrompt)
+  const [input, setInput] = useState('')
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [statusLine, setStatusLine] = useState('Idle')
+  const [connection, setConnection] = useState<'unknown' | 'online' | 'offline'>('unknown')
+  const [errorBanner, setErrorBanner] = useState('')
+  const [showReasoningById, setShowReasoningById] = useState<Record<string, boolean>>({})
+  const [showEvidenceByFactId, setShowEvidenceByFactId] = useState<Record<string, boolean>>({})
+  const [hydratedFromDb, setHydratedFromDb] = useState(false)
+  const [memoryStatus, setMemoryStatus] = useState('Idle')
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus>('idle')
+  const [fileJobs, setFileJobs] = useState<FileIngestJob[]>([])
+  const [dragActive, setDragActive] = useState(false)
+  const [episodeStatus, setEpisodeStatus] = useState('Idle')
+  const [profileStatus, setProfileStatus] = useState('Idle')
+  const [optimizerStatus, setOptimizerStatus] = useState<'idle' | 'optimizing' | 'ready' | 'failed'>('idle')
+  const [personaOptimizerStatus, setPersonaOptimizerStatus] = useState<'idle' | 'optimizing' | 'ready' | 'failed'>(
+    'idle',
+  )
+  const [scenarioOptimizerStatus, setScenarioOptimizerStatus] = useState<'idle' | 'optimizing' | 'ready' | 'failed'>(
+    'idle',
+  )
+  const [optimizerPreview, setOptimizerPreview] = useState<{
+    target: 'system' | 'persona' | 'scenario'
+    currentPrompt: string
+    result: SystemPromptOptimizationResult
+  } | null>(null)
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugEntries, setDebugEntries] = useState<BrainDebugEntry[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const systemPromptRef = useRef<HTMLTextAreaElement>(null)
+  const scenarioPromptRef = useRef<HTMLTextAreaElement>(null)
+  const personaTextRef = useRef<HTMLTextAreaElement>(null)
+  const sendInFlightRef = useRef(false)
+  const memoryQueueRef = useRef(createMemoryQueue())
+  const memoryGraphRef = useRef(memoryGraph)
+
+  const client = useMemo(() => new LmStudioClient(baseUrl), [baseUrl])
+  const memoryModelId = selectedBrainModel
+  const memoryTaskModel = useMemo(() => {
+    const configured = memoryModelId.trim()
+    if (!configured) return selectedModel
+    return configured
+  }, [memoryModelId, selectedModel])
+  const optimizerSystemPromptFor = (target: 'system' | 'persona' | 'scenario'): string =>
+    getOptimizerSystemPrompt(target)
+
+  useEffect(() => {
+    setLmStudioEmbeddingModel(selectedEmbedModel)
+  }, [selectedEmbedModel])
+
+  useEffect(() => {
+    let cancelled = false
+    setEmbeddingStatus('loading')
+    void (async () => {
+      const status = await initializeEmbeddings()
+      if (cancelled) return
+
+      if (status === 'ready') {
+        setEmbeddingStatus('ready')
+        setDebugEntries((current) => [
+          {
+            id: uid(),
+            at: new Date().toISOString(),
+            kind: 'embed' as const,
+            model: 'Xenova/all-MiniLM-L6-v2',
+            status: 'ready' as const,
+            raw: 'Embeddings initialization finished with browser provider',
+            embeddingStatus: 'ready' as const,
+          },
+          ...current,
+        ].slice(0, 60))
+        return
+      }
+
+      try {
+        await probeApiEmbeddings(client)
+        if (cancelled) return
+        setEmbeddingStatus('ready')
+        setDebugEntries((current) => [
+          {
+            id: uid(),
+            at: new Date().toISOString(),
+            kind: 'embed' as const,
+            model: getLmStudioEmbeddingModel(),
+            status: 'ready' as const,
+            raw: 'Browser embeddings unavailable; LM Studio API embeddings ready',
+            embeddingStatus: 'ready' as const,
+          },
+          ...current,
+        ].slice(0, 60))
+      } catch (error) {
+        if (cancelled) return
+        setEmbeddingStatus('failed')
+        setDebugEntries((current) => [
+          {
+            id: uid(),
+            at: new Date().toISOString(),
+            kind: 'embed' as const,
+            model: getLmStudioEmbeddingModel(),
+            status: 'failed' as const,
+            raw: '',
+            embeddingStatus: 'failed' as const,
+            error: error instanceof Error ? error.message : 'embedding init failed',
+          },
+          ...current,
+        ].slice(0, 60))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [client])
+
+  useEffect(() => {
+    memoryGraphRef.current = memoryGraph
+  }, [memoryGraph])
+
+  useEffect(() => {
+    autoResizeTextarea(systemPromptRef.current)
+  }, [systemPrompt])
+
+  useEffect(() => {
+    autoResizeTextarea(scenarioPromptRef.current)
+  }, [scenarioPrompt])
+
+  useEffect(() => {
+    autoResizeTextarea(personaTextRef.current)
+  }, [personaMode.personaText])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      await migrateLocalStateToDexieOnce(legacyPersistedSnapshot)
+      const [dbMessages, dbGraph] = await Promise.all([
+        loadMessages(DEFAULT_SESSION_ID),
+        loadMemoryGraph(),
+      ])
+      if (cancelled) return
+      if (dbMessages.length > 0) {
+        setMessages(dbMessages)
+      }
+      if (dbGraph.facts.length > 0 || dbGraph.evidence.length > 0 || dbGraph.conflicts.length > 0) {
+        setMemoryGraph(dbGraph)
+      }
+      setHydratedFromDb(true)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    saveUiState({
+      baseUrl,
+      selectedModel,
+      brainModel: selectedBrainModel,
+      embedModel: selectedEmbedModel,
+      systemPrompt,
+      scenarioPrompt,
+      lastOptimizationMeta,
+      personaMode,
+      lastResponseId,
+      lastFailedPrompt,
+    })
+  }, [
+    baseUrl,
+    selectedModel,
+    selectedBrainModel,
+    selectedEmbedModel,
+    systemPrompt,
+    scenarioPrompt,
+    lastOptimizationMeta,
+    personaMode,
+    lastResponseId,
+    lastFailedPrompt,
+  ])
+
+  useEffect(() => {
+    if (!hydratedFromDb) return
+    void saveMessages(DEFAULT_SESSION_ID, messages)
+  }, [hydratedFromDb, messages])
+
+  useEffect(() => {
+    if (!hydratedFromDb) return
+    void saveMemoryGraph(memoryGraph)
+  }, [hydratedFromDb, memoryGraph])
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('lmstudio-theme', theme)
+  }, [theme])
+
+  const chatModels = useMemo(() => models.filter((model) => !isEmbeddingModel(model)), [models])
+  const brainModels = chatModels
+  const brainOptions = useMemo(() => {
+    if (brainModels.length > 0) return brainModels
+    if (!selectedBrainModel) return []
+    return [{ id: selectedBrainModel }] as ModelInfo[]
+  }, [brainModels, selectedBrainModel])
+  const embeddingModels = useMemo(() => models.filter((model) => isEmbeddingModel(model)), [models])
+  const embeddingOptions = useMemo(() => {
+    if (embeddingModels.length > 0) return embeddingModels
+    if (!selectedEmbedModel) return []
+    return [{ id: selectedEmbedModel }] as ModelInfo[]
+  }, [embeddingModels, selectedEmbedModel])
+
+  const isMainModelLoaded = useMemo(() => {
+    const model = models.find((item) => item.id === selectedModel || item.key === selectedModel)
+    return Boolean(model && isModelLoaded(model))
+  }, [models, selectedModel])
+
+  const isBrainModelLoaded = useMemo(() => {
+    const model = models.find((item) => item.id === selectedBrainModel || item.key === selectedBrainModel)
+    return Boolean(model && isModelLoaded(model))
+  }, [models, selectedBrainModel])
+
+  const isEmbeddingCompanionLoaded = useMemo(() => {
+    const embedding = models.find((model) => model.id === selectedEmbedModel || model.key === selectedEmbedModel)
+    return Boolean(embedding && isModelLoaded(embedding))
+  }, [models, selectedEmbedModel])
+
+  const sortedFacts = useMemo(
+    () => [...memoryGraph.facts].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+    [memoryGraph.facts],
+  )
+
+  const fileDerivedFactCount = useMemo(
+    () => memoryGraph.facts.filter((fact) => fact.sourceTags.includes('file')).length,
+    [memoryGraph.facts],
+  )
+
+  const vectorMemoryCount = useMemo(() => memoryGraph.vectorIndex?.length ?? 0, [memoryGraph.vectorIndex])
+
+  const evidenceByFactId = useMemo(() => {
+    const map = new Map<string, typeof memoryGraph.evidence>()
+    for (const item of memoryGraph.evidence) {
+      const current = map.get(item.factId) ?? []
+      current.push(item)
+      map.set(item.factId, current)
+    }
+    for (const [key, value] of map.entries()) {
+      value.sort((a, b) => new Date(b.extractedAt).getTime() - new Date(a.extractedAt).getTime())
+      map.set(key, value)
+    }
+    return map
+  }, [memoryGraph.evidence])
+
+  const refreshModels = async (): Promise<ModelInfo[]> => {
+    try {
+      setStatusLine('Fetching models...')
+      const listed = await client.listModels()
+      setModels(listed)
+      setConnection('online')
+      setErrorBanner('')
+      const firstChatModel = listed.find((model) => !isEmbeddingModel(model))
+      const firstEmbeddingModel =
+        listed.find((model) => model.id === selectedEmbedModel || model.key === selectedEmbedModel) ??
+        listed.find((model) => isEmbeddingModel(model))
+      const firstBrainModel =
+        listed.find((model) => model.id === selectedBrainModel || model.key === selectedBrainModel) ??
+        firstChatModel
+
+      if (!selectedModel && firstChatModel) {
+        setSelectedModel(firstChatModel.id)
+      }
+      if (!selectedBrainModel && firstBrainModel) {
+        setSelectedBrainModel(firstBrainModel.id)
+      }
+      if (!selectedEmbedModel && firstEmbeddingModel) {
+        setSelectedEmbedModel(firstEmbeddingModel.id)
+      }
+      setStatusLine('Models refreshed')
+      return listed
+    } catch (error) {
+      setConnection('offline')
+      setErrorBanner(`Connection error: ${toErrorMessage(error)}`)
+      setStatusLine('Unable to reach LM Studio')
+      return []
+    }
+  }
+
+  useEffect(() => {
+    void refreshModels()
+  }, [baseUrl])
+
+  const appendAssistantEvent = (assistantId: string, updater: (msg: ChatMessage) => ChatMessage): void => {
+    setMessages((current) =>
+      current.map((msg) => {
+        if (msg.id !== assistantId) return msg
+        return updater(msg)
+      }),
+    )
+  }
+
+  const pushDebug = (entry: Omit<BrainDebugEntry, 'id' | 'at'>): void => {
+    setDebugEntries((current) => [
+      { id: uid(), at: new Date().toISOString(), ...entry },
+      ...current,
+    ].slice(0, 60))
+  }
+
+  const runMemoryExtraction = async (
+    userText: string,
+    sourceMessageId: string,
+    context?: { previousUserMessage?: string; previousAssistantMessage?: string },
+  ): Promise<void> => {
+    if (!memoryTaskModel) return
+
+    setMemoryStatus('Extracting')
+
+    const analysis = await extractUserFactsNlFirst({
+      client,
+      model: memoryTaskModel,
+      userText,
+      context,
+    })
+
+    const { extraction } = analysis
+    pushDebug({
+      kind: 'extract',
+      model: memoryTaskModel,
+      status: analysis.usedFallback ? 'json-fallback' : 'nl',
+      prompt: userText,
+      selectedCount: extraction.facts.length,
+      raw: analysis.rawText,
+      error: analysis.error,
+      parsePath: analysis.parseMode,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+    if (extraction.facts.length === 0) {
+      setMemoryStatus('No durable facts detected')
+      return
+    }
+
+    let factDelta = 0
+    let conflictDetected = false
+
+    setMemoryGraph((current) => {
+      const before = current.facts.length
+      const merged = mergeFactsWithConflicts(current, extraction, sourceMessageId)
+      factDelta = merged.graph.facts.length - before
+      conflictDetected = merged.conflictDetected
+      return merged.graph
+    })
+
+    if (conflictDetected) {
+      setMemoryStatus(analysis.usedFallback ? 'Conflict detected (json fallback)' : 'Conflict detected')
+      return
+    }
+
+    if (analysis.usedFallback) {
+      setMemoryStatus(factDelta > 0 ? `JSON fallback (+${factDelta})` : 'JSON fallback')
+      return
+    }
+
+    setMemoryStatus(factDelta > 0 ? `Merged (+${factDelta})` : 'Merged')
+  }
+
+  const sendMessage = async (
+    rawPrompt?: string,
+    options?: {
+      includeUserMessage?: boolean
+      previousResponseIdOverride?: string | null
+      forceFreshSample?: boolean
+    },
+  ): Promise<void> => {
+    const includeUserMessage = options?.includeUserMessage ?? true
+    const previousResponseIdForTurn =
+      options?.previousResponseIdOverride === undefined ? lastResponseId : options.previousResponseIdOverride
+    const prompt = (rawPrompt ?? input).trim()
+    if (!prompt || isStreaming || sendInFlightRef.current) return
+    if (!selectedModel) {
+      setErrorBanner('Select a model first')
+      return
+    }
+    sendInFlightRef.current = true
+
+    try {
+    const userMessage: ChatMessage = {
+      id: uid(),
+      role: 'user',
+      content: prompt,
+      createdAt: new Date().toISOString(),
+    }
+    const previousUserMessage = [...messages].reverse().find((item) => item.role === 'user')?.content
+    const previousAssistantMessage = [...messages].reverse().find((item) => item.role === 'assistant')?.content
+    const workingInput = buildWorkingMemoryInput(messages, prompt, WORKING_MEMORY_LIMIT)
+
+    const semanticInfo = await semanticPrefilterFacts({
+      graph: memoryGraph,
+      prompt,
+      limit: 20,
+      client,
+      allowApiFallback: false,
+    })
+    const graphForRetrieval = semanticInfo.graph ?? memoryGraph
+    if (semanticInfo.graph) {
+      setMemoryGraph(semanticInfo.graph)
+    }
+    const lexicalShortlist = prefilterFacts(graphForRetrieval, prompt)
+    const currentEmbeddingStatus = getEmbeddingStatus()
+    const resolvedEmbeddingStatus: EmbeddingStatus = semanticInfo.provider
+      ? 'ready'
+      : semanticInfo.usedFallback
+        ? 'failed'
+        : embeddingStatus === 'ready'
+          ? 'ready'
+          : currentEmbeddingStatus
+    setEmbeddingStatus(resolvedEmbeddingStatus)
+    pushDebug({
+      kind: 'embed',
+      model:
+        semanticInfo.provider === 'api'
+          ? getLmStudioEmbeddingModel()
+          : semanticInfo.provider === 'hash'
+            ? 'LocalHash/256'
+            : 'Xenova/all-MiniLM-L6-v2',
+      status: semanticInfo.usedFallback ? 'fallback' : semanticInfo.provider ?? 'ok',
+      prompt,
+      shortlistCount: semanticInfo.results.length,
+      selectedCount: lexicalShortlist.length,
+      raw: semanticInfo.usedFallback
+        ? semanticInfo.error ?? 'semantic fallback'
+        : `provider=${semanticInfo.provider ?? 'browser'} semantic=${semanticInfo.results.length} lexical=${lexicalShortlist.length} vectors+${semanticInfo.embeddedCount ?? 0}`,
+      embeddingStatus: resolvedEmbeddingStatus,
+      error: semanticInfo.error,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+
+    const shortlist = mergeHybridCandidates(semanticInfo.results, lexicalShortlist, 20)
+    const personaContext = buildPersonaPrompt(personaMode)
+    const episodicInfo = await findRelevantEpisodes({
+      sessionId: DEFAULT_SESSION_ID,
+      prompt,
+      client,
+      topK: 3,
+    })
+    const episodicContextBlock = buildEpisodicContextBlock(episodicInfo.episodes)
+    setEpisodeStatus(
+      episodicInfo.episodes.length > 0
+        ? `Context ${episodicInfo.episodes.length} (${episodicInfo.provider})`
+        : 'No episodic match',
+    )
+    pushDebug({
+      kind: 'episode-summary',
+      model: selectedModel,
+      status: episodicInfo.episodes.length > 0 ? 'retrieved' : 'empty',
+      prompt,
+      shortlistCount: episodicInfo.episodes.length,
+      selectedCount: episodicInfo.episodes.length,
+      raw: episodicInfo.episodes.map((episode) => episode.summary).join('\n'),
+      error: episodicInfo.error,
+      personaEnabled: personaContext.personaEnabled,
+      personaIntensity: personaContext.intensity,
+      personaBlockLength: personaContext.personaBlock.length,
+    })
+    let selectedFacts: MemoryFact[] = shortlist.map((item) => item.fact).slice(0, RECALL_LIMIT)
+
+    if (shortlist.length > 0) {
+      const rerankInfo = await rerankFactsWithModel(
+        client,
+        selectedModel,
+        prompt,
+        shortlist.map((item) => item.fact),
+      )
+      const rerank = rerankInfo.result
+      pushDebug({
+        kind: 'rerank',
+        model: selectedModel,
+        status: rerank ? 'ok' : 'fallback',
+        prompt,
+        shortlistCount: shortlist.length,
+        selectedCount: rerank?.selectedFactIds.length ?? 0,
+        raw: rerankInfo.rawText,
+        error: rerankInfo.error,
+        personaEnabled: personaContext.personaEnabled,
+        personaIntensity: personaContext.intensity,
+        personaBlockLength: personaContext.personaBlock.length,
+      })
+
+      if (rerank && rerank.selectedFactIds.length > 0) {
+        const byId = new Map(shortlist.map((item) => [item.fact.id, item.fact]))
+        selectedFacts = rerank.selectedFactIds
+          .map((id) => byId.get(id))
+          .filter((fact): fact is MemoryFact => Boolean(fact))
+          .slice(0, RECALL_LIMIT)
+        if (selectedFacts.length > 0) {
+          setMemoryStatus('Reranked')
+        }
+      }
+    }
+
+    const recall = buildMemoryContext(selectedFacts)
+    const fullSystemPrompt = composeSystemPrompt([
+      systemPrompt.trim(),
+      personaContext.personaBlock,
+      scenarioPrompt.trim() ? `Scenario Block:\n${scenarioPrompt.trim()}` : '',
+      recall.contextBlock,
+      episodicContextBlock,
+    ])
+
+    const assistantId = uid()
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      createdAt: new Date().toISOString(),
+      partial: true,
+      sourcePrompt: prompt,
+      parentResponseId: previousResponseIdForTurn ?? null,
+    }
+
+    setMessages((current) => [...current, ...(includeUserMessage ? [userMessage] : []), assistantMessage])
+    setInput('')
+    setIsStreaming(true)
+    setErrorBanner('')
+    setLastFailedPrompt(null)
+    let streamState = initialAccumulator()
+    let streamResponseId: string | null = null
+
+    const applyEvent = (event: StreamEvent): void => {
+      streamState = applyStreamEvent(streamState, event)
+      setStatusLine(streamState.statusLine || 'Streaming...')
+      const maybeResponseId = extractResponseId(event)
+      if (maybeResponseId) {
+        streamResponseId = maybeResponseId
+      }
+
+      appendAssistantEvent(assistantId, (msg) => ({
+        ...msg,
+        content: streamState.messageText,
+        reasoning: streamState.reasoningText,
+        responseId: streamResponseId ?? msg.responseId,
+      }))
+    }
+
+    const request = {
+      model: selectedModel,
+      input: workingInput,
+      system_prompt: fullSystemPrompt || undefined,
+      previous_response_id: previousResponseIdForTurn ?? undefined,
+      store: true,
+      stream: true,
+      ...(options?.forceFreshSample
+        ? {
+            temperature: 0.9,
+            top_p: 0.95,
+          }
+        : {}),
+    }
+
+      await client.streamChat(
+        request,
+        {
+        onEvent: applyEvent,
+        onComplete: () => {
+          const finalAssistantMessage: ChatMessage = {
+            id: assistantId,
+            role: 'assistant',
+            content: streamState.messageText || '[No message content]',
+            createdAt: assistantMessage.createdAt,
+            reasoning: streamState.reasoningText,
+            partial: false,
+            responseId: streamResponseId ?? undefined,
+            sourcePrompt: prompt,
+            parentResponseId: previousResponseIdForTurn ?? null,
+          }
+
+          const postTurnMessages = [...messages, ...(includeUserMessage ? [userMessage] : []), finalAssistantMessage]
+          appendAssistantEvent(assistantId, (msg) => ({
+            ...msg,
+            partial: false,
+            content: msg.content || '[No message content]',
+          }))
+          if (streamResponseId) {
+            setLastResponseId(streamResponseId)
+          }
+          setStatusLine('Response complete')
+          setIsStreaming(false)
+          if (includeUserMessage) {
+            void runMemoryExtraction(prompt, userMessage.id, {
+              previousUserMessage,
+              previousAssistantMessage,
+            })
+
+            void memoryQueueRef.current.enqueue(async () => {
+              try {
+                const episodeResult = await enqueueEpisodeSummary({
+                  sessionId: DEFAULT_SESSION_ID,
+                  messages: postTurnMessages,
+                  client,
+                  model: memoryTaskModel,
+                })
+                if (!episodeResult.skipped && episodeResult.episode) {
+                  setEpisodeStatus(`Summarized chunk (${episodeResult.embeddingProvider ?? 'unknown'})`)
+                } else if (episodeResult.reason === 'not-enough-messages') {
+                  setEpisodeStatus('Waiting for enough history')
+                }
+                pushDebug({
+                  kind: 'episode-summary',
+                  model: memoryTaskModel,
+                  status: episodeResult.skipped ? 'skipped' : 'stored',
+                  raw: episodeResult.episode?.summary ?? episodeResult.reason ?? '[none]',
+                  error: episodeResult.reason === 'empty-summary' ? 'empty summary' : undefined,
+                  personaEnabled: personaMode.enabled,
+                  personaIntensity: personaMode.intensity,
+                  personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+                })
+              } catch (episodeError) {
+                setEpisodeStatus('Episode summary failed')
+                pushDebug({
+                  kind: 'episode-summary',
+                  model: memoryTaskModel,
+                  status: 'failed',
+                  raw: '',
+                  error: toErrorMessage(episodeError),
+                  personaEnabled: personaMode.enabled,
+                  personaIntensity: personaMode.intensity,
+                  personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+                })
+              }
+
+              try {
+                const profileResult = await runProfileExtractionCycle({
+                  sessionId: DEFAULT_SESSION_ID,
+                  messages: postTurnMessages,
+                  graph: memoryGraphRef.current,
+                  client,
+                  model: memoryTaskModel,
+                })
+                if (profileResult.ran) {
+                  if (profileResult.factDelta !== 0) {
+                    setMemoryGraph(profileResult.graph)
+                    memoryGraphRef.current = profileResult.graph
+                  }
+                  setProfileStatus(
+                    profileResult.result.lines.length > 0
+                      ? `Updated (${profileResult.result.parseMode})`
+                      : 'No new profile info',
+                  )
+                  pushDebug({
+                    kind: 'profile-extract',
+                    model: memoryTaskModel,
+                    status: profileResult.result.usedFallback ? 'json-fallback' : 'nl',
+                    selectedCount: profileResult.result.lines.length,
+                    raw: profileResult.result.rawText,
+                    parsePath: profileResult.result.parseMode,
+                    error: profileResult.result.error,
+                    personaEnabled: personaMode.enabled,
+                    personaIntensity: personaMode.intensity,
+                    personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+                  })
+                }
+              } catch (profileError) {
+                setProfileStatus('Profile extract failed')
+                pushDebug({
+                  kind: 'profile-extract',
+                  model: memoryTaskModel,
+                  status: 'failed',
+                  raw: '',
+                  error: toErrorMessage(profileError),
+                  personaEnabled: personaMode.enabled,
+                  personaIntensity: personaMode.intensity,
+                  personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+                })
+              }
+            })
+          }
+        },
+        onError: (error) => {
+          appendAssistantEvent(assistantId, (msg) => ({
+            ...msg,
+            partial: true,
+            content: msg.content || '[Stream interrupted]',
+          }))
+          setLastFailedPrompt(prompt)
+          setErrorBanner(`Stream error: ${error.message}`)
+          setStatusLine('Stream interrupted')
+          setIsStreaming(false)
+        },
+        },
+      )
+    } catch (error) {
+      setErrorBanner(`Send failed: ${toErrorMessage(error)}`)
+      setStatusLine('Send failed')
+      setIsStreaming(false)
+    } finally {
+      sendInFlightRef.current = false
+    }
+  }
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      void sendMessage()
+    }
+  }
+
+  const loadModelById = async (modelId: string, label: string): Promise<void> => {
+    if (!modelId) {
+      setErrorBanner(`Pick a ${label} model to load`)
+      return
+    }
+    try {
+      setStatusLine(`Loading ${label} model: ${modelId}...`)
+      await client.loadModel(modelId)
+      await refreshModels()
+      setStatusLine(`Loaded ${label} model: ${modelId}`)
+    } catch (error) {
+      setErrorBanner(`${label} load failed: ${toErrorMessage(error)}`)
+      setStatusLine(`${label} model load failed`)
+    }
+  }
+
+  const unloadModelById = async (modelId: string, label: string): Promise<void> => {
+    if (!modelId) {
+      setErrorBanner(`Pick a ${label} model to unload`)
+      return
+    }
+    try {
+      setStatusLine(`Unloading ${label} model: ${modelId}...`)
+      await client.unloadModel(modelId)
+      await refreshModels()
+      setStatusLine(`Unloaded ${label} model: ${modelId}`)
+    } catch (error) {
+      setErrorBanner(`${label} unload failed: ${toErrorMessage(error)}`)
+      setStatusLine(`${label} model unload failed`)
+    }
+  }
+
+  const clearChat = (): void => {
+    setMessages([])
+    setLastResponseId(null)
+    setLastFailedPrompt(null)
+    setShowReasoningById({})
+    setEpisodeStatus('Idle')
+    setProfileStatus('Idle')
+    setStatusLine('New chat started')
+  }
+
+  const lastAssistantMessage = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message.role === 'assistant' && message.sourcePrompt) {
+        return message
+      }
+    }
+    return null
+  }, [messages])
+
+  const regenerateLastResponse = async (): Promise<void> => {
+    if (isStreaming) return
+    if (!lastAssistantMessage?.sourcePrompt) {
+      setErrorBanner('No assistant response available to regenerate')
+      return
+    }
+
+    setMessages((current) => current.filter((message) => message.id !== lastAssistantMessage.id))
+    setLastResponseId(lastAssistantMessage.parentResponseId ?? null)
+    setStatusLine('Regenerating...')
+    await sendMessage(lastAssistantMessage.sourcePrompt, {
+      includeUserMessage: false,
+      previousResponseIdOverride: lastAssistantMessage.parentResponseId ?? null,
+      forceFreshSample: true,
+    })
+  }
+
+  const removeFact = (factId: string): void => {
+    setMemoryGraph((current) => deleteFact(current, factId))
+  }
+
+  const clearAllMemories = (): void => {
+    setMemoryGraph(clearMemoryGraph())
+    setMemoryStatus('Idle')
+  }
+
+  const resolveConflictWinner = (conflictId: string, winnerFactId: string): void => {
+    setMemoryGraph((current) => resolveConflict(current, conflictId, winnerFactId))
+    setMemoryStatus('Merged')
+  }
+
+  const clearFileDerivedFacts = (): void => {
+    setMemoryGraph((current) => clearFileFacts(current))
+    setMemoryStatus('File-derived memories cleared')
+    pushDebug({
+      kind: 'file',
+      model: memoryTaskModel || selectedModel || 'none',
+      status: 'cleared',
+      raw: 'Cleared file-derived memory facts and evidence',
+      embeddingStatus,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+  }
+
+  const retryEmbeddings = async (): Promise<void> => {
+    setEmbeddingStatus('loading')
+    const status = await initializeEmbeddings(true)
+    let resolvedStatus: EmbeddingStatus = status
+    let error = status === 'failed' ? getEmbeddingError() : undefined
+
+    if (status === 'failed') {
+      try {
+        await probeApiEmbeddings(client)
+        resolvedStatus = 'ready'
+        error = undefined
+        setErrorBanner('')
+      } catch (apiError) {
+        resolvedStatus = 'failed'
+        const apiMessage = apiError instanceof Error ? apiError.message : 'api embeddings failed'
+        error = `${error || 'browser embeddings failed'} | ${apiMessage}`
+        setErrorBanner(`Embeddings failed: ${error}`)
+      }
+    }
+
+    setEmbeddingStatus(resolvedStatus)
+    pushDebug({
+      kind: 'embed',
+      model: resolvedStatus === 'ready' && status === 'failed' ? getLmStudioEmbeddingModel() : 'Xenova/all-MiniLM-L6-v2',
+      status: resolvedStatus,
+      raw:
+        resolvedStatus === 'ready'
+          ? status === 'ready'
+            ? 'Embeddings retry succeeded (browser provider)'
+            : 'Embeddings retry succeeded (LM Studio API provider)'
+          : 'Embeddings retry failed',
+      embeddingStatus: resolvedStatus,
+      error,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+  }
+
+  const runAnalyzeAndMergeVectorMemories = async (): Promise<void> => {
+    const snapshot = memoryGraphRef.current
+    if (snapshot.facts.length < 2) {
+      setMemoryStatus('Need at least 2 facts to analyze')
+      return
+    }
+
+    setMemoryStatus('Analyzing vector memories...')
+    setErrorBanner('')
+
+    try {
+      const promptSeed = snapshot.facts
+        .filter((fact) => fact.status !== 'superseded')
+        .slice(0, 8)
+        .map((fact) => fact.canonicalText)
+        .join(' | ') || 'memory vector analysis'
+
+      const semanticInfo = await semanticPrefilterFacts({
+        graph: snapshot,
+        prompt: promptSeed,
+        limit: 20,
+        client,
+        allowApiFallback: true,
+      })
+
+      const graphWithVectors = semanticInfo.graph ?? snapshot
+      const mergeResult = analyzeAndMergeVectorMemories(graphWithVectors)
+      const nextGraph = mergeResult.graph
+      setMemoryGraph(nextGraph)
+      memoryGraphRef.current = nextGraph
+
+      const resolvedEmbeddingStatus: EmbeddingStatus = semanticInfo.provider
+        ? 'ready'
+        : semanticInfo.usedFallback
+          ? 'failed'
+          : embeddingStatus
+      setEmbeddingStatus(resolvedEmbeddingStatus)
+
+      if (semanticInfo.usedFallback && semanticInfo.error) {
+        setErrorBanner(`Vector analysis fallback: ${semanticInfo.error}`)
+      }
+
+      setMemoryStatus(
+        mergeResult.mergedPairs > 0
+          ? `Vector merge complete (${mergeResult.mergedPairs} merged)`
+          : 'Vector analysis complete (no merges)',
+      )
+
+      pushDebug({
+        kind: 'embed',
+        model:
+          semanticInfo.provider === 'api'
+            ? getLmStudioEmbeddingModel()
+            : semanticInfo.provider === 'hash'
+              ? 'LocalHash/256'
+              : 'Xenova/all-MiniLM-L6-v2',
+        status: mergeResult.mergedPairs > 0 ? 'vector-merged' : 'vector-analyzed',
+        prompt: promptSeed,
+        shortlistCount: semanticInfo.results.length,
+        selectedCount: mergeResult.mergedPairs,
+        raw: `provider=${semanticInfo.provider ?? 'unknown'} vectors+${semanticInfo.embeddedCount ?? 0} merged=${mergeResult.mergedPairs}`,
+        embeddingStatus: resolvedEmbeddingStatus,
+        error: semanticInfo.error,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setMemoryStatus('Vector analysis failed')
+      setErrorBanner(`Vector analysis failed: ${message}`)
+      pushDebug({
+        kind: 'embed',
+        model: selectedEmbedModel || 'unknown',
+        status: 'vector-merge-failed',
+        raw: '',
+        error: message,
+        embeddingStatus,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    }
+  }
+
+  const upsertFileJob = (job: FileIngestJob): void => {
+    setFileJobs((current) => {
+      const index = current.findIndex((item) => item.id === job.id)
+      if (index < 0) return [job, ...current].slice(0, 30)
+      const next = [...current]
+      next[index] = job
+      return next
+    })
+  }
+
+  const handleFileList = async (incomingFiles: FileList | File[]): Promise<void> => {
+    if (!selectedBrainModel) {
+      setErrorBanner('Select a brain model before file ingestion')
+      return
+    }
+
+    const files = Array.from(incomingFiles)
+    if (files.length === 0) return
+    setStatusLine(`Ingesting ${files.length} file(s)...`)
+    pushDebug({
+      kind: 'file',
+      model: memoryTaskModel,
+      status: 'started',
+      raw: `Starting file ingest for ${files.map((file) => file.name).join(', ')}`,
+      embeddingStatus,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+
+    const baselineFacts = memoryGraph.facts.length
+    const result = await ingestDroppedFiles({
+      files,
+      model: memoryTaskModel,
+      client,
+      graph: memoryGraph,
+      onJobUpdate: upsertFileJob,
+      onDebug: (message) => {
+        pushDebug({
+          kind: 'file',
+          model: memoryTaskModel,
+          status: 'processing',
+          raw: message,
+          embeddingStatus,
+          personaEnabled: personaMode.enabled,
+          personaIntensity: personaMode.intensity,
+          personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+        })
+      },
+    })
+
+    setMemoryGraph(result.graph)
+    const addedFacts = Math.max(0, result.graph.facts.length - baselineFacts)
+    if (result.errors.length > 0) {
+      setErrorBanner(`File ingest warnings: ${result.errors.join(' | ')}`)
+    }
+    setStatusLine('File ingest complete')
+    setMemoryStatus(`File ingest done (+${addedFacts} facts)`)
+    pushDebug({
+      kind: 'file',
+      model: memoryTaskModel,
+      status: result.errors.length > 0 ? 'done-with-warnings' : 'done',
+      raw: `jobs=${result.jobs.length} addedFacts=${addedFacts}${result.errors.length ? ` errors=${result.errors.join('; ')}` : ''}`,
+      embeddingStatus,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+  }
+
+  const onDropZoneDragOver = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    setDragActive(true)
+  }
+
+  const onDropZoneDragLeave = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    setDragActive(false)
+  }
+
+  const onDropZoneDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault()
+    setDragActive(false)
+    void handleFileList(event.dataTransfer.files)
+  }
+
+  const onSidebarTextareaInput = (event: FormEvent<HTMLTextAreaElement>): void => {
+    autoResizeTextarea(event.currentTarget)
+  }
+
+  const runOptimizeSystemPrompt = async (): Promise<void> => {
+    if (isStreaming || !selectedModel) return
+    const currentPrompt = systemPrompt
+    if (!currentPrompt.trim()) {
+      setErrorBanner('Add a system prompt before optimizing')
+      return
+    }
+
+    setOptimizerStatus('optimizing')
+    setErrorBanner('')
+    pushDebug({
+      kind: 'optimize',
+      model: selectedModel,
+      status: 'optimizing',
+      raw: '',
+      parsePath: 'start',
+      optimizeTarget: 'system',
+      optimizerSystemPromptUsed: optimizerSystemPromptFor('system'),
+      chatSystemMessageSnapshot: systemPrompt,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+
+    try {
+      const result = await optimizeSystemPrompt(client, selectedModel, currentPrompt)
+      setOptimizerPreview({
+        target: 'system',
+        currentPrompt,
+        result,
+      })
+      setOptimizerStatus('ready')
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'ready',
+        raw: result.rawOutput,
+        parsePath: result.parsePath,
+        optimizeTarget: 'system',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('system'),
+        chatSystemMessageSnapshot: systemPrompt,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setOptimizerStatus('failed')
+      setErrorBanner(`Prompt optimize failed: ${message}`)
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'failed',
+        raw: '',
+        parsePath: 'failed',
+        optimizeTarget: 'system',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('system'),
+        chatSystemMessageSnapshot: systemPrompt,
+        error: message,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    }
+  }
+
+  const runOptimizePersona = async (): Promise<void> => {
+    if (isStreaming || !selectedModel) return
+    const currentPrompt = personaMode.personaText
+    if (!currentPrompt.trim()) {
+      setErrorBanner('Add custom persona text before optimizing')
+      return
+    }
+
+    setPersonaOptimizerStatus('optimizing')
+    setErrorBanner('')
+    pushDebug({
+      kind: 'optimize',
+      model: selectedModel,
+      status: 'optimizing',
+      raw: '',
+      parsePath: 'start',
+      optimizeTarget: 'persona',
+      optimizerSystemPromptUsed: optimizerSystemPromptFor('persona'),
+      chatSystemMessageSnapshot: systemPrompt,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+
+    try {
+      const result = await optimizeCustomPersona(client, selectedModel, currentPrompt)
+      setOptimizerPreview({
+        target: 'persona',
+        currentPrompt,
+        result,
+      })
+      setPersonaOptimizerStatus('ready')
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'ready',
+        raw: result.rawOutput,
+        parsePath: result.parsePath,
+        optimizeTarget: 'persona',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('persona'),
+        chatSystemMessageSnapshot: systemPrompt,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setPersonaOptimizerStatus('failed')
+      setErrorBanner(`Persona optimize failed: ${message}`)
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'failed',
+        raw: '',
+        parsePath: 'failed',
+        optimizeTarget: 'persona',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('persona'),
+        chatSystemMessageSnapshot: systemPrompt,
+        error: message,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    }
+  }
+
+  const runOptimizeScenario = async (): Promise<void> => {
+    if (isStreaming || !selectedModel) return
+    const currentPrompt = scenarioPrompt
+    if (!currentPrompt.trim()) {
+      setErrorBanner('Add a scenario block before optimizing')
+      return
+    }
+
+    setScenarioOptimizerStatus('optimizing')
+    setErrorBanner('')
+    pushDebug({
+      kind: 'optimize',
+      model: selectedModel,
+      status: 'optimizing',
+      raw: '',
+      parsePath: 'start',
+      optimizeTarget: 'scenario',
+      optimizerSystemPromptUsed: optimizerSystemPromptFor('scenario'),
+      chatSystemMessageSnapshot: systemPrompt,
+      personaEnabled: personaMode.enabled,
+      personaIntensity: personaMode.intensity,
+      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+    })
+
+    try {
+      const result = await optimizeScenarioPrompt(client, selectedModel, currentPrompt)
+      setOptimizerPreview({
+        target: 'scenario',
+        currentPrompt,
+        result,
+      })
+      setScenarioOptimizerStatus('ready')
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'ready',
+        raw: result.rawOutput,
+        parsePath: result.parsePath,
+        optimizeTarget: 'scenario',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('scenario'),
+        chatSystemMessageSnapshot: systemPrompt,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setScenarioOptimizerStatus('failed')
+      setErrorBanner(`Scenario optimize failed: ${message}`)
+      pushDebug({
+        kind: 'optimize',
+        model: selectedModel,
+        status: 'failed',
+        raw: '',
+        parsePath: 'failed',
+        optimizeTarget: 'scenario',
+        optimizerSystemPromptUsed: optimizerSystemPromptFor('scenario'),
+        chatSystemMessageSnapshot: systemPrompt,
+        error: message,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    }
+  }
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <h1>LM Studio Chat</h1>
+        <div className="theme-row">
+          <span>Theme</span>
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme((current) => (current === 'light' ? 'dark' : 'light'))}
+            type="button"
+          >
+            {theme === 'light' ? 'Dark mode' : 'Light mode'}
+          </button>
+        </div>
+        <label htmlFor="baseUrl">LM Studio URL</label>
+        <input
+          id="baseUrl"
+          value={baseUrl}
+          onChange={(event) => setBaseUrl(event.target.value)}
+          placeholder={DEFAULT_BASE_URL}
+          disabled={isStreaming}
+        />
+
+        <p className={`connection ${connection}`}>Connection: {connection}</p>
+
+        <details className="model-group" open>
+          <summary>Model Load Settings</summary>
+
+          <label htmlFor="mainModelSelect">Main LLM model</label>
+          <select
+            id="mainModelSelect"
+            value={selectedModel}
+            onChange={(event) => setSelectedModel(event.target.value)}
+            disabled={isStreaming || chatModels.length === 0}
+          >
+            <option value="">Select main model...</option>
+            {chatModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.id}
+              </option>
+            ))}
+          </select>
+          <div className="button-row model-actions">
+            <button onClick={() => void loadModelById(selectedModel, 'Main')} disabled={isStreaming || !selectedModel}>
+              Load
+            </button>
+            <button onClick={() => void unloadModelById(selectedModel, 'Main')} disabled={isStreaming || !selectedModel}>
+              Unload
+            </button>
+          </div>
+          <p className="memory-meta">Main loaded: {isMainModelLoaded ? 'yes' : 'no'}</p>
+
+          <label htmlFor="brainModelSelect">Brain model</label>
+          <select
+            id="brainModelSelect"
+            value={selectedBrainModel}
+            onChange={(event) => setSelectedBrainModel(event.target.value)}
+            disabled={isStreaming || brainOptions.length === 0}
+          >
+            <option value="">Select brain model...</option>
+            {brainOptions.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.id}
+              </option>
+            ))}
+          </select>
+          <div className="button-row model-actions">
+            <button
+              onClick={() => void loadModelById(selectedBrainModel, 'Brain')}
+              disabled={isStreaming || !selectedBrainModel}
+            >
+              Load
+            </button>
+            <button
+              onClick={() => void unloadModelById(selectedBrainModel, 'Brain')}
+              disabled={isStreaming || !selectedBrainModel}
+            >
+              Unload
+            </button>
+          </div>
+          <p className="memory-meta">Brain loaded: {isBrainModelLoaded ? 'yes' : 'no'}</p>
+
+          <label htmlFor="embedModelSelect">Embed model</label>
+          <select
+            id="embedModelSelect"
+            value={selectedEmbedModel}
+            onChange={(event) => setSelectedEmbedModel(event.target.value)}
+            disabled={isStreaming || embeddingOptions.length === 0}
+          >
+            <option value="">Select embedding model...</option>
+            {embeddingOptions.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.id}
+              </option>
+            ))}
+          </select>
+          <div className="button-row model-actions">
+            <button
+              onClick={() => void loadModelById(selectedEmbedModel, 'Embed')}
+              disabled={isStreaming || !selectedEmbedModel}
+            >
+              Load
+            </button>
+            <button
+              onClick={() => void unloadModelById(selectedEmbedModel, 'Embed')}
+              disabled={isStreaming || !selectedEmbedModel}
+            >
+              Unload
+            </button>
+          </div>
+          <p className="memory-meta">Embed loaded: {isEmbeddingCompanionLoaded ? 'yes' : 'no'}</p>
+        </details>
+
+        <details className="model-group" open>
+          <summary>System Message</summary>
+          <label htmlFor="systemPrompt">System message</label>
+          <textarea
+            ref={systemPromptRef}
+            id="systemPrompt"
+            className="sidebar-system"
+            value={systemPrompt}
+            onChange={(event) => setSystemPrompt(event.target.value)}
+            onInput={onSidebarTextareaInput}
+            placeholder="You are a helpful local assistant..."
+            disabled={isStreaming}
+          />
+          <div className="system-tools">
+            <button onClick={() => void runOptimizeSystemPrompt()} disabled={isStreaming || !selectedModel}>
+              Optimize
+            </button>
+            <span className="memory-meta">
+              Optimizer:{' '}
+              {optimizerStatus === 'optimizing'
+                ? 'Optimizing'
+                : optimizerStatus === 'ready'
+                  ? 'Ready'
+                  : optimizerStatus === 'failed'
+                    ? 'Failed'
+                    : 'Idle'}
+            </span>
+          </div>
+          {lastOptimizationMeta ? (
+            <p className="memory-meta">
+              Last optimized: {new Date(lastOptimizationMeta.at).toLocaleString()} ({lastOptimizationMeta.model})
+            </p>
+          ) : null}
+        </details>
+
+        <details className="model-group" open>
+          <summary>Persona</summary>
+          <p className="memory-meta">
+            Roleplay: {personaMode.enabled ? 'On' : 'Off'} | {personaMode.intensity}%
+          </p>
+          <button
+            onClick={() =>
+              setPersonaMode((current) => ({
+                ...current,
+                enabled: !current.enabled,
+                personaUpdatedAt: new Date().toISOString(),
+              }))
+            }
+            disabled={isStreaming}
+          >
+            {personaMode.enabled ? 'Disable roleplay' : 'Enable roleplay'}
+          </button>
+          <label htmlFor="personaIntensity">Roleplay intensity</label>
+          <input
+            id="personaIntensity"
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={personaMode.intensity}
+            onChange={(event) =>
+              setPersonaMode((current) => ({
+                ...current,
+                intensity: Number(event.target.value),
+                personaUpdatedAt: new Date().toISOString(),
+              }))
+            }
+            disabled={isStreaming}
+          />
+          <label htmlFor="personaText">Custom persona</label>
+          <textarea
+            ref={personaTextRef}
+            id="personaText"
+            className="sidebar-system"
+            value={personaMode.personaText}
+            onChange={(event) =>
+              setPersonaMode((current) => ({
+                ...current,
+                personaText: event.target.value,
+                personaUpdatedAt: new Date().toISOString(),
+              }))
+            }
+            onInput={onSidebarTextareaInput}
+            placeholder="Example: A warm, witty friend who talks naturally and asks thoughtful follow-ups."
+            disabled={isStreaming}
+          />
+          <div className="system-tools">
+            <button onClick={() => void runOptimizePersona()} disabled={isStreaming || !selectedModel}>
+              Optimize persona
+            </button>
+            <span className="memory-meta">
+              Persona optimizer:{' '}
+              {personaOptimizerStatus === 'optimizing'
+                ? 'Optimizing'
+                : personaOptimizerStatus === 'ready'
+                  ? 'Ready'
+                  : personaOptimizerStatus === 'failed'
+                    ? 'Failed'
+                    : 'Idle'}
+            </span>
+          </div>
+        </details>
+
+        <details className="model-group" open>
+          <summary>Scenario</summary>
+          <label htmlFor="scenarioPrompt">Scenario block</label>
+          <textarea
+            ref={scenarioPromptRef}
+            id="scenarioPrompt"
+            className="sidebar-system"
+            value={scenarioPrompt}
+            onChange={(event) => setScenarioPrompt(event.target.value)}
+            onInput={onSidebarTextareaInput}
+            placeholder="Example: You are helping with a noir detective roleplay set in 1940s Chicago."
+            disabled={isStreaming}
+          />
+          <div className="system-tools">
+            <button onClick={() => void runOptimizeScenario()} disabled={isStreaming || !selectedModel}>
+              Optimize scenario
+            </button>
+            <span className="memory-meta">
+              Scenario optimizer:{' '}
+              {scenarioOptimizerStatus === 'optimizing'
+                ? 'Optimizing'
+                : scenarioOptimizerStatus === 'ready'
+                  ? 'Ready'
+                  : scenarioOptimizerStatus === 'failed'
+                    ? 'Failed'
+                    : 'Idle'}
+            </span>
+          </div>
+        </details>
+
+        <div className="button-row">
+          <button onClick={() => void refreshModels()} disabled={isStreaming}>
+            Refresh
+          </button>
+        </div>
+
+        <p className="active-model">Main model: {selectedModel || 'none'}</p>
+        <p className="memory-meta">Brain model: {selectedBrainModel || 'none'}</p>
+        <p className="memory-meta">Embed model: {selectedEmbedModel || 'none'}</p>
+      </aside>
+
+      <main className="chat-panel">
+        <div className="status-bar">
+          <span>{statusLine}</span>
+          {errorBanner ? <span className="error">{errorBanner}</span> : null}
+        </div>
+
+        <section className="timeline">
+          {messages.length === 0 ? <p className="empty">Start by loading a model and sending a message.</p> : null}
+          {messages.map((message) => (
+            <article key={message.id} className={`bubble ${message.role}`}>
+              <header>
+                <strong>{message.role}</strong>
+                <time>{new Date(message.createdAt).toLocaleTimeString()}</time>
+              </header>
+              <p>{message.content || (message.partial ? '...' : '')}</p>
+
+              {message.role === 'assistant' && message.reasoning ? (
+                <details
+                  open={Boolean(showReasoningById[message.id])}
+                  onToggle={(event) =>
+                    setShowReasoningById((current) => ({
+                      ...current,
+                      [message.id]: (event.target as HTMLDetailsElement).open,
+                    }))
+                  }
+                >
+                  <summary>Reasoning</summary>
+                  <pre>{message.reasoning}</pre>
+                </details>
+              ) : null}
+            </article>
+          ))}
+        </section>
+
+        <section className="composer">
+          <div
+            className={`drop-zone ${dragActive ? 'active' : ''}`}
+            onDragOver={onDropZoneDragOver}
+            onDragLeave={onDropZoneDragLeave}
+            onDrop={onDropZoneDrop}
+            onClick={() => fileInputRef.current?.click()}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                fileInputRef.current?.click()
+              }
+            }}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.md,.csv"
+              multiple
+              hidden
+              onChange={(event) => {
+                if (event.target.files) {
+                  void handleFileList(event.target.files)
+                  event.target.value = ''
+                }
+              }}
+            />
+            <strong>Drop files for Brain ingest</strong>
+            <p>.txt, .md, .csv | up to 5 files, 2MB each</p>
+          </div>
+          {fileJobs.length > 0 ? (
+            <div className="file-jobs">
+              {fileJobs.slice(0, 5).map((job) => (
+                <p key={job.id} className="memory-meta">
+                  {job.fileName}: {job.status} ({job.processedChunks}/{job.totalChunks})
+                  {job.error ? ` - ${job.error}` : ''}
+                </p>
+              ))}
+            </div>
+          ) : null}
+          <textarea
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            onKeyDown={onComposerKeyDown}
+            placeholder="Message the local model..."
+            disabled={isStreaming}
+          />
+          <div className="composer-actions">
+            <button onClick={() => void sendMessage()} disabled={isStreaming || !input.trim() || !selectedModel}>
+              Send
+            </button>
+            {lastFailedPrompt ? (
+              <button onClick={() => void sendMessage(lastFailedPrompt)} disabled={isStreaming || !selectedModel}>
+                Retry Last Failed Prompt
+              </button>
+            ) : null}
+          </div>
+        </section>
+      </main>
+
+      <aside className="sidebar sidebar-right">
+        <h2>Actions</h2>
+        <button onClick={clearChat} disabled={isStreaming || messages.length === 0}>
+          Clear chat
+        </button>
+        <button
+          onClick={() => void regenerateLastResponse()}
+          disabled={isStreaming || !selectedModel || !lastAssistantMessage}
+        >
+          Regen last response
+        </button>
+        <button onClick={() => setDebugOpen(true)} disabled={false}>
+          Brain debug
+        </button>
+
+        <h2>Brain v2</h2>
+        <p className="memory-status">{memoryStatus}</p>
+        <p className="memory-meta">Episodes: {episodeStatus}</p>
+        <p className="memory-meta">User profile: {profileStatus}</p>
+        <p className="memory-meta">Embeddings: {embeddingStatus}</p>
+        <p className="memory-meta">Vector memories: {vectorMemoryCount}</p>
+        <p className="memory-meta">File-derived facts: {fileDerivedFactCount}</p>
+        <button onClick={() => void retryEmbeddings()} disabled={isStreaming || embeddingStatus === 'loading'}>
+          Retry embeddings
+        </button>
+        <button
+          onClick={() => void runAnalyzeAndMergeVectorMemories()}
+          disabled={isStreaming || embeddingStatus === 'loading' || memoryGraph.facts.length < 2}
+        >
+          Analyze and merge vector memories
+        </button>
+        <button onClick={clearAllMemories} disabled={memoryGraph.facts.length === 0 || isStreaming}>
+          Clear all memories
+        </button>
+        <button onClick={clearFileDerivedFacts} disabled={fileDerivedFactCount === 0 || isStreaming}>
+          Clear file facts
+        </button>
+        <div className="memory-list" role="list">
+          {sortedFacts.length === 0 ? <p className="empty">No stored facts yet.</p> : null}
+          {sortedFacts.map((fact) => {
+            const evidence = evidenceByFactId.get(fact.id) ?? []
+            const open = Boolean(showEvidenceByFactId[fact.id])
+            return (
+              <article key={fact.id} className="memory-item" role="listitem">
+                <header>
+                  <strong>{fact.category}</strong>
+                  <span>{fact.status}</span>
+                </header>
+                <p>{fact.canonicalText}</p>
+                <p className="memory-meta">
+                  {Math.round(fact.confidence * 100)}% | {evidence.length} evidence |{' '}
+                  {new Date(fact.updatedAt).toLocaleString()} | sources: {fact.sourceTags.join(',')}
+                </p>
+                <div className="memory-actions">
+                  <button
+                    onClick={() =>
+                      setShowEvidenceByFactId((current) => ({
+                        ...current,
+                        [fact.id]: !open,
+                      }))
+                    }
+                    disabled={isStreaming}
+                  >
+                    {open ? 'Hide evidence' : 'Show evidence'}
+                  </button>
+                  <button onClick={() => removeFact(fact.id)} disabled={isStreaming}>
+                    Delete
+                  </button>
+                </div>
+                {open ? (
+                  <ul className="evidence-list">
+                    {evidence.length === 0 ? <li>No evidence yet.</li> : null}
+                    {evidence.map((entry) => (
+                      <li key={entry.id}>
+                        <span>{Math.round(entry.confidence * 100)}%</span> {entry.verbatim}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </article>
+            )
+          })}
+
+          {memoryGraph.conflicts.length > 0 ? <h3 className="conflict-title">Conflicts</h3> : null}
+          {memoryGraph.conflicts.map((conflict) => {
+            const factA = memoryGraph.facts.find((fact) => fact.id === conflict.factAId)
+            const factB = memoryGraph.facts.find((fact) => fact.id === conflict.factBId)
+            if (!factA || !factB) return null
+
+            return (
+              <article key={conflict.id} className="memory-item">
+                <header>
+                  <strong>Conflict</strong>
+                  <span>{conflict.resolvedManually ? 'manual' : 'auto'}</span>
+                </header>
+                <p>{factA.canonicalText}</p>
+                <p>{factB.canonicalText}</p>
+                <p className="memory-meta">Winner: {conflict.winnerFactId === factA.id ? 'A' : 'B'}</p>
+                <div className="memory-actions">
+                  <button onClick={() => resolveConflictWinner(conflict.id, factA.id)} disabled={isStreaming}>
+                    Set A winner
+                  </button>
+                  <button onClick={() => resolveConflictWinner(conflict.id, factB.id)} disabled={isStreaming}>
+                    Set B winner
+                  </button>
+                </div>
+              </article>
+            )
+          })}
+        </div>
+      </aside>
+
+      <aside className={`debug-drawer ${debugOpen ? 'open' : ''}`}>
+        <div className="debug-head">
+          <h2>Brain Debug</h2>
+          <div className="memory-actions">
+            <button onClick={() => setDebugEntries([])} disabled={debugEntries.length === 0}>
+              Clear logs
+            </button>
+            <button onClick={() => setDebugOpen(false)}>Close</button>
+          </div>
+        </div>
+        <div className="debug-list">
+          {debugEntries.length === 0 ? <p className="empty">No debug events yet.</p> : null}
+          {debugEntries.map((entry) => (
+            <article key={entry.id} className="memory-item">
+              <header>
+                <strong>{entry.kind}</strong>
+                <span>{entry.status}</span>
+              </header>
+              <p className="memory-meta">
+                {new Date(entry.at).toLocaleTimeString()} | model: {entry.model}
+              </p>
+              {entry.prompt ? (
+                <p>
+                  prompt: <code>{entry.prompt.slice(0, 120)}</code>
+                </p>
+              ) : null}
+              {entry.kind !== 'optimize' ? (
+                <p className="memory-meta">
+                  shortlist: {entry.shortlistCount ?? '-'} | selected: {entry.selectedCount ?? '-'}
+                </p>
+              ) : (
+                <>
+                  <p className="memory-meta">
+                    target: {entry.optimizeTarget ?? 'system'} | parse path: {entry.parsePath ?? '-'}
+                  </p>
+                  <p className="memory-meta">
+                    optimizer system prompt: <code>{(entry.optimizerSystemPromptUsed ?? '').slice(0, 120)}</code>
+                  </p>
+                  <p className="memory-meta">
+                    chat system message: <code>{(entry.chatSystemMessageSnapshot ?? '').slice(0, 120)}</code>
+                  </p>
+                </>
+              )}
+              <p className="memory-meta">
+                embeddings: {entry.embeddingStatus ?? '-'} | persona: {entry.personaEnabled ? 'on' : 'off'} |
+                intensity: {entry.personaIntensity ?? '-'} | block: {entry.personaBlockLength ?? 0}
+              </p>
+              {entry.error ? <p className="error">{entry.error}</p> : null}
+              <details>
+                <summary>Raw response</summary>
+                <pre>{entry.raw || '[empty]'}</pre>
+              </details>
+            </article>
+          ))}
+        </div>
+      </aside>
+
+      {optimizerPreview ? (
+        <div className="optimizer-overlay" role="dialog" aria-modal="true" aria-label="Prompt optimization preview">
+          <article className="optimizer-modal">
+            <header>
+              <h2>
+                {optimizerPreview.target === 'persona'
+                  ? 'Optimized Custom Persona'
+                  : optimizerPreview.target === 'scenario'
+                    ? 'Optimized Scenario Block'
+                    : 'Optimized System Prompt'}
+              </h2>
+            </header>
+            <section>
+              <h3>
+                {optimizerPreview.target === 'persona'
+                  ? 'Current Custom Persona'
+                  : optimizerPreview.target === 'scenario'
+                    ? 'Current Scenario Block'
+                    : 'Current Chat System Message'}
+              </h3>
+              <pre>{optimizerPreview.currentPrompt || '[empty]'}</pre>
+            </section>
+            <section>
+              <h3>Improved Prompt</h3>
+              <pre>{optimizerPreview.result.optimizedPrompt}</pre>
+            </section>
+            <section>
+              <h3>Rationale</h3>
+              <p>{optimizerPreview.result.rationale}</p>
+            </section>
+            <div className="memory-actions">
+              <button
+                onClick={() => {
+                  if (optimizerPreview.target === 'persona') {
+                    setPersonaMode((current) => ({
+                      ...current,
+                      personaText: optimizerPreview.result.optimizedPrompt,
+                      personaUpdatedAt: new Date().toISOString(),
+                    }))
+                    setPersonaOptimizerStatus('idle')
+                  } else if (optimizerPreview.target === 'scenario') {
+                    setScenarioPrompt(optimizerPreview.result.optimizedPrompt)
+                    setScenarioOptimizerStatus('idle')
+                  } else {
+                    setSystemPrompt(optimizerPreview.result.optimizedPrompt)
+                    setOptimizerStatus('idle')
+                  }
+                  setLastOptimizationMeta({
+                    at: new Date().toISOString(),
+                    model: selectedModel,
+                  })
+                  setOptimizerPreview(null)
+                }}
+              >
+                Accept
+              </button>
+              <button
+                onClick={() => {
+                  setOptimizerPreview(null)
+                  if (optimizerPreview.target === 'persona') {
+                    setPersonaOptimizerStatus('idle')
+                  } else if (optimizerPreview.target === 'scenario') {
+                    setScenarioOptimizerStatus('idle')
+                  } else {
+                    setOptimizerStatus('idle')
+                  }
+                }}
+              >
+                Reject
+              </button>
+            </div>
+          </article>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+export default App
