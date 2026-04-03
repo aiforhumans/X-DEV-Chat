@@ -337,6 +337,14 @@ export const listEpisodes = async (sessionId: string): Promise<EpisodeRecord[]> 
   return rows
 }
 
+export const clearEpisodes = async (sessionId: string): Promise<void> => {
+  if (db) {
+    await db.episodes.where('sessionId').equals(sessionId).delete()
+    return
+  }
+  fallback.episodes.delete(sessionId)
+}
+
 export const getEpisodeCursor = async (sessionId: string): Promise<number> =>
   getMetaValue(`episodes.cursor.${sessionId}`, 0)
 

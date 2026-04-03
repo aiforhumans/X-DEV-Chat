@@ -1,82 +1,89 @@
 # Function Linkage Audit
 
-This document maps runtime call chains and their test coverage for the LM Studio Local Chat app.
+This document maps runtime call chains and test ownership for the LM Studio Local Chat app.
 
 ## Runtime Call Chains
 
 ### Main Chat Turn Flow
-1. `App.sendMessage` gathers user input and model selection.
-2. `semanticPrefilterFacts` + `prefilterFacts` produce memory candidates.
-3. `mergeHybridCandidates` merges semantic + lexical candidates.
-4. `rerankFactsWithModel` selects top facts.
-5. `buildMemoryContext` builds compact memory block.
-6. `buildPersonaPrompt` + `composeSystemPrompt` compose final system prompt.
-7. `LmStudioClient.streamChat` streams assistant response.
-8. `applyStreamEvent` + `extractResponseId` update live message state.
-9. On success, `runMemoryExtraction` calls `extractFactsWithModel`.
-10. `mergeFactsWithConflicts` updates graph with evidence/conflict handling.
 
-Primary runtime entrypoint: [`src/App.tsx`](G:/cchhat/src/App.tsx)
+1. `App.sendMessage` gathers user input + selected model.
+2. `semanticPrefilterFacts` + `prefilterFacts` build semantic/lexical candidate pools.
+3. `mergeHybridCandidates` composes a merged shortlist.
+4. `rerankFactsWithModel` selects top memory facts.
+5. `buildMemoryContext` composes memory context block.
+6. `buildPersonaPrompt` + `composeSystemPrompt` build final system message.
+7. `LmStudioClient.streamChat` streams assistant output.
+8. `applyStreamEvent` + `extractResponseId` update live assistant state.
+9. `runMemoryExtraction` calls `extractUserFactsNlFirst` and `mergeFactsWithConflicts`.
 
-### Brain Graph + Management Flow
-- Storage load/save: `loadPersistedState` / `savePersistedState`.
-- Graph render conversion: `buildKnowledgeGraphElements`.
-- Manual controls: `deleteFact`, `clearFileFacts`, `clearMemoryGraph`, `resolveConflict`.
+Primary runtime entrypoint: `src/App.tsx`.
+
+### Episodic + Profile Flow
+
+1. `sendMessage` enqueues post-turn memory jobs via `createMemoryQueue`.
+2. `enqueueEpisodeSummary` summarizes chunks outside working window.
+3. `runProfileExtractionCycle` runs cadence-based profile extraction and merges results.
+4. `findRelevantEpisodes` semantically recalls prior episode summaries for prompt context.
 
 ### File Ingestion Flow
-1. `handleFileList` -> `ingestDroppedFiles`.
-2. `chunkText` splits content.
-3. Per chunk: `extractFactsWithModel` -> `mergeFactsWithConflicts` with `sourceType: file`.
-4. UI progress updates via `onJobUpdate`; errors surfaced in status/debug.
 
-### Optimizer Flow
-1. `runOptimizeSystemPrompt` / `runOptimizePersona`.
-2. `optimizeSystemPrompt` / `optimizeCustomPersona`.
-3. `parseOptimizationOutput`; on malformed output, `repairOptimizationOutput`; retry if needed.
-4. Preview modal accept/reject updates persisted config only.
+1. `handleFileList` calls `ingestDroppedFiles`.
+2. `chunkText` splits file text into chunk windows.
+3. Each chunk calls `extractFactsWithModel` then `mergeFactsWithConflicts` with file provenance.
+4. `onGraphUpdate` applies chunk-level graph updates against latest graph ref.
 
-## Static Module Dependency Map
+### Persistence Flow
 
-- `App.tsx` depends on:
-  - `lmStudioClient`
-  - `chatStream`
-  - `memoryGraph`
-  - `semanticSearch`
-  - `fileIngest`
-  - `personaMode`
-  - `systemPromptOptimizer`
-  - `optimizerConfig`
-  - `knowledgeGraph`
-  - `persistence`
-- `fileIngest` depends on `memoryGraph`.
-- `persistence` depends on `memoryGraph` and `personaMode`.
-- `semanticSearch` depends on `lmStudioClient`.
-- `systemPromptOptimizer` depends on `optimizerConfig` and `lmStudioClient`.
+- `loadUiState` / `saveUiState`: UI settings and local app controls.
+- `loadMessages` / `saveMessages`: conversation message persistence (Dexie/fallback).
+- `loadMemoryGraph` / `saveMemoryGraph`: Brain graph persistence (facts, evidence, aliases, conflicts, vectorIndex).
+- `setEpisodeCursor` / `resetProfileTurnCounter` / `clearEpisodes`: metadata reset paths used by clear-chat behavior.
+
+## Module Dependency Map
+
+- `src/App.tsx` depends on:
+  - `db/database`
+  - `lib/lmStudioClient`
+  - `lib/chatStream`
+  - `lib/memoryGraph`
+  - `lib/semanticSearch`
+  - `lib/memoryIntelligence`
+  - `lib/episodicMemory`
+  - `lib/fileIngest`
+  - `lib/personaMode`
+  - `lib/systemPromptOptimizer`
+  - `lib/optimizerConfig`
+  - `lib/persistence`
+- `lib/fileIngest` depends on `lib/memoryGraph`.
+- `lib/episodicMemory` depends on `db/database`, `lib/memoryGraph`, `lib/memoryIntelligence`, and `lib/semanticSearch`.
+- `lib/semanticSearch` depends on `lib/lmStudioClient` and browser transformers runtime.
 
 ## Test Ownership Matrix
 
-- `chatStream`: [`src/lib/chatStream.test.ts`](G:/cchhat/src/lib/chatStream.test.ts)
-  - Covers stream accumulator transitions + response ID extraction.
-- `lmStudioClient`: [`src/lib/lmStudioClient.test.ts`](G:/cchhat/src/lib/lmStudioClient.test.ts)
-  - Covers model APIs, stream behavior, non-stream chat errors, embeddings fallback/error.
-- `memoryGraph`: [`src/lib/memoryGraph.test.ts`](G:/cchhat/src/lib/memoryGraph.test.ts)
-  - Covers migration, merge/conflicts, evidence cap, prune cap, extraction/rerank fallback/repair, cleanup.
-- `semanticSearch`: [`src/lib/semanticSearch.test.ts`](G:/cchhat/src/lib/semanticSearch.test.ts)
-  - Covers browser init, API probe, semantic fallback, caching, error surfacing.
-- `fileIngest`: [`src/lib/fileIngest.test.ts`](G:/cchhat/src/lib/fileIngest.test.ts)
-  - Covers chunking, full ingest orchestration, provenance tagging, failed extraction handling.
-- `optimizerConfig`: [`src/lib/optimizerConfig.test.ts`](G:/cchhat/src/lib/optimizerConfig.test.ts)
-  - Covers template rendering and prompt retrieval.
-- `systemPromptOptimizer`: [`src/lib/systemPromptOptimizer.test.ts`](G:/cchhat/src/lib/systemPromptOptimizer.test.ts)
-  - Covers parser, repair/retry path, system + persona optimization contract.
-- `personaMode`: [`src/lib/personaMode.test.ts`](G:/cchhat/src/lib/personaMode.test.ts)
-  - Covers persona block generation, intensity clamp, composition order.
-- `persistence`: [`src/lib/persistence.test.ts`](G:/cchhat/src/lib/persistence.test.ts)
-  - Covers defaults, restore/save/clear, migration.
-- `knowledgeGraph`: [`src/lib/knowledgeGraph.test.ts`](G:/cchhat/src/lib/knowledgeGraph.test.ts)
-  - Covers graph node/edge generation.
-- Live integration (opt-in): [`src/lib/lmStudio.integration.test.ts`](G:/cchhat/src/lib/lmStudio.integration.test.ts)
-  - Covers list/load/unload/chat/embeddings against a running LM Studio server.
+- `src/App.test.tsx`
+  - Covers top-level UI wiring: streaming send path, clear chat, model load/unload, embedding retry, optimizer acceptance, base URL apply behavior.
+- `src/db/database.test.ts`
+  - Covers fallback migration, working-window reads, and episodic/profile metadata reset utilities.
+- `src/lib/chatStream.test.ts`
+  - Covers stream accumulator behavior + response id handling.
+- `src/lib/lmStudioClient.test.ts`
+  - Covers model APIs, chat API behavior, and embeddings API handling.
+- `src/lib/memoryGraph.test.ts`
+  - Covers conflict merge behavior, evidence handling, migration, and rerank paths.
+- `src/lib/semanticSearch.test.ts`
+  - Covers browser/API/hash fallback behavior, cache behavior, and scoring helpers.
+- `src/lib/fileIngest.test.ts`
+  - Covers chunking, ingestion orchestration, failure handling, and CSV parsing behavior.
+- `src/lib/optimizerConfig.test.ts`
+  - Covers optimizer prompt config retrieval.
+- `src/lib/systemPromptOptimizer.test.ts`
+  - Covers optimize parse/repair/retry behavior.
+- `src/lib/personaMode.test.ts`
+  - Covers persona composition behavior.
+- `src/lib/persistence.test.ts`
+  - Covers save/load defaults and migration helpers.
+- `src/lib/lmStudio.integration.test.ts`
+  - Optional live integration checks against a running LM Studio instance.
 
 ## Integration Toggle
 

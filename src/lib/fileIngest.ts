@@ -14,16 +14,52 @@ const extension = (name: string): string => {
   return parts.length > 1 ? parts.pop() ?? '' : ''
 }
 
+const parseCsvRows = (raw: string): string[][] => {
+  const rows: string[][] = []
+  let row: string[] = []
+  let cell = ''
+  let inQuotes = false
+  const normalized = raw.replace(/\r\n/g, '\n')
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index]
+    const next = normalized[index + 1]
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        cell += '"'
+        index += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+      continue
+    }
+
+    if (char === ',' && !inQuotes) {
+      row.push(cell)
+      cell = ''
+      continue
+    }
+
+    if (char === '\n' && !inQuotes) {
+      row.push(cell)
+      rows.push(row)
+      row = []
+      cell = ''
+      continue
+    }
+
+    cell += char
+  }
+
+  row.push(cell)
+  rows.push(row)
+  return rows
+}
+
 const normalizeCsv = (raw: string): string => {
-  const rows = raw
-    .split(/\r?\n/)
-    .map((row) =>
-      row
-        .split(',')
-        .map((cell) => cell.trim().replace(/^"|"$/g, ''))
-        .filter(Boolean)
-        .join(' | '),
-    )
+  const rows = parseCsvRows(raw)
+    .map((cells) => cells.map((cell) => cell.trim()).filter(Boolean).join(' | '))
     .filter(Boolean)
   return rows.join('\n')
 }
@@ -90,11 +126,14 @@ export const ingestDroppedFiles = async (params: {
   model: string
   client: LmStudioClient
   graph: MemoryGraphState
+  getGraph?: () => MemoryGraphState
+  onGraphUpdate?: (graph: MemoryGraphState) => void
   onJobUpdate?: (job: FileIngestJob) => void
   onDebug?: (message: string) => void
-}): Promise<{ graph: MemoryGraphState; jobs: FileIngestJob[]; errors: string[] }> => {
+}): Promise<{ graph: MemoryGraphState; jobs: FileIngestJob[]; errors: string[]; addedFacts: number }> => {
   const { valid, errors } = validateFiles(params.files)
   let graph = params.graph
+  let addedFacts = 0
   const jobs: FileIngestJob[] = []
 
   for (const file of valid) {
@@ -124,8 +163,9 @@ export const ingestDroppedFiles = async (params: {
 
       for (const chunk of chunks) {
         const extraction = await extractFactsWithModel(params.client, params.model, chunk.text)
-        graph = mergeFactsWithConflicts(
-          graph,
+        const baseGraph = params.getGraph?.() ?? graph
+        const merged = mergeFactsWithConflicts(
+          baseGraph,
           extraction.extraction,
           `file:${chunk.fileId}:${chunk.index}`,
           {
@@ -136,6 +176,9 @@ export const ingestDroppedFiles = async (params: {
             },
           },
         ).graph
+        addedFacts += Math.max(0, merged.facts.length - baseGraph.facts.length)
+        graph = merged
+        params.onGraphUpdate?.(merged)
         job.processedChunks += 1
         params.onDebug?.(
           `[file-ingest] ${file.name} chunk ${job.processedChunks}/${job.totalChunks} extracted=${extraction.extraction.facts.length}`,
@@ -153,5 +196,5 @@ export const ingestDroppedFiles = async (params: {
     }
   }
 
-  return { graph, jobs, errors }
+  return { graph, jobs, errors, addedFacts }
 }

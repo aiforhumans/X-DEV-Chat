@@ -80,6 +80,7 @@ LMSTUDIO_TEST_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 ### Chat + Model Runtime
 
 - Uses LM Studio REST endpoints for model lifecycle and chat streaming.
+- Uses an editable URL field with explicit `Apply URL` commit to avoid per-keystroke reconnect churn.
 - Maintains `previous_response_id` for stateful follow-up turns.
 - Supports reasoning stream capture in UI.
 
@@ -142,6 +143,7 @@ LMSTUDIO_TEST_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 
 - Architecture and linkage audit: [docs/LINKAGE_AUDIT.md](docs/LINKAGE_AUDIT.md)
 - Project snapshot: [project_summary.md](project_summary.md)
+- Engineering TODOs: [TODO.md](TODO.md)
 
 ## Contributing
 

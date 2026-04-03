@@ -33,6 +33,9 @@ const mocks = vi.hoisted(() => ({
   mockLoadMemoryGraph: vi.fn<() => Promise<Record<string, unknown>>>(),
   mockSaveMessages: vi.fn<() => Promise<void>>(),
   mockSaveMemoryGraph: vi.fn<() => Promise<void>>(),
+  mockSetEpisodeCursor: vi.fn<() => Promise<void>>(),
+  mockResetProfileTurnCounter: vi.fn<() => Promise<void>>(),
+  mockClearEpisodes: vi.fn<() => Promise<void>>(),
   mockFindRelevantEpisodes: vi.fn(),
   mockEnqueueEpisodeSummary: vi.fn(),
   mockRunProfileExtractionCycle: vi.fn(),
@@ -94,6 +97,9 @@ vi.mock('./db/database', () => ({
   loadMemoryGraph: mocks.mockLoadMemoryGraph,
   saveMessages: mocks.mockSaveMessages,
   saveMemoryGraph: mocks.mockSaveMemoryGraph,
+  setEpisodeCursor: mocks.mockSetEpisodeCursor,
+  resetProfileTurnCounter: mocks.mockResetProfileTurnCounter,
+  clearEpisodes: mocks.mockClearEpisodes,
 }))
 
 vi.mock('./lib/episodicMemory', () => ({
@@ -137,6 +143,7 @@ vi.mock('./lib/fileIngest', () => ({
     graph,
     jobs: [],
     errors: [],
+    addedFacts: 0,
   })),
 }))
 
@@ -233,6 +240,9 @@ describe('App', () => {
     mocks.mockLoadMemoryGraph.mockResolvedValue({ ...emptyGraph })
     mocks.mockSaveMessages.mockResolvedValue()
     mocks.mockSaveMemoryGraph.mockResolvedValue()
+    mocks.mockSetEpisodeCursor.mockResolvedValue()
+    mocks.mockResetProfileTurnCounter.mockResolvedValue()
+    mocks.mockClearEpisodes.mockResolvedValue()
     mocks.mockFindRelevantEpisodes.mockResolvedValue({ episodes: [], provider: 'none' })
     mocks.mockEnqueueEpisodeSummary.mockResolvedValue({ skipped: true, reason: 'not-enough-messages' })
     mocks.mockRunProfileExtractionCycle.mockResolvedValue({
@@ -273,6 +283,9 @@ describe('App', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear chat' }))
     await screen.findByText('Start by loading a model and sending a message.')
+    expect(mocks.mockSetEpisodeCursor).toHaveBeenCalledWith('default-session', 0)
+    expect(mocks.mockResetProfileTurnCounter).toHaveBeenCalledWith('default-session')
+    expect(mocks.mockClearEpisodes).toHaveBeenCalledWith('default-session')
   })
 
   it('regenerates last response with fresh sampling options', async () => {
@@ -342,6 +355,26 @@ describe('App', () => {
     fireEvent.click(unloadButtons[2])
     await waitFor(() => {
       expect(mocks.mockUnloadModel).toHaveBeenCalledWith('text-embedding-nomic-embed-text-v1.5')
+    })
+  })
+
+  it('applies base URL changes only when user commits', async () => {
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    expect(mocks.mockListModels).toHaveBeenCalledTimes(1)
+
+    const baseUrlInput = screen.getByLabelText('LM Studio URL')
+    fireEvent.change(baseUrlInput, { target: { value: 'http://localhost:4321' } })
+
+    await waitFor(() => {
+      expect(mocks.mockListModels).toHaveBeenCalledTimes(1)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply URL' }))
+
+    await waitFor(() => {
+      expect(mocks.mockListModels).toHaveBeenCalledTimes(2)
     })
   })
 

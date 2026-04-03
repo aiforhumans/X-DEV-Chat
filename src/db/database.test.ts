@@ -83,4 +83,37 @@ describe('database fallback migration', () => {
 
     ;(globalThis as { indexedDB?: unknown }).indexedDB = original
   })
+
+  it('resets episodic cursor and profile counters and clears episodes', async () => {
+    const original = (globalThis as { indexedDB?: unknown }).indexedDB
+    ;(globalThis as { indexedDB?: unknown }).indexedDB = undefined
+    vi.resetModules()
+    const db = await import('./database')
+
+    await db.addEpisode({
+      sessionId: db.DEFAULT_SESSION_ID,
+      summary: 'Episode summary',
+      embedding: [0.1, 0.2],
+      startIndex: 0,
+      endIndex: 4,
+      createdAt: new Date().toISOString(),
+      sourceMessageIds: ['m1'],
+    })
+    await db.setEpisodeCursor(db.DEFAULT_SESSION_ID, 12)
+    await db.incrementProfileTurnCounter(db.DEFAULT_SESSION_ID)
+
+    await db.clearEpisodes(db.DEFAULT_SESSION_ID)
+    await db.setEpisodeCursor(db.DEFAULT_SESSION_ID, 0)
+    await db.resetProfileTurnCounter(db.DEFAULT_SESSION_ID)
+
+    const cursor = await db.getEpisodeCursor(db.DEFAULT_SESSION_ID)
+    const episodes = await db.listEpisodes(db.DEFAULT_SESSION_ID)
+    const turnsAfterReset = await db.incrementProfileTurnCounter(db.DEFAULT_SESSION_ID)
+
+    expect(cursor).toBe(0)
+    expect(episodes).toHaveLength(0)
+    expect(turnsAfterReset).toBe(1)
+
+    ;(globalThis as { indexedDB?: unknown }).indexedDB = original
+  })
 })

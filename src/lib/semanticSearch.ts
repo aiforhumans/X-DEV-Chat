@@ -13,6 +13,7 @@ const HASH_VECTOR_DIM = 256
 const SHORTLIST_LIMIT = 20
 const API_BATCH_SIZE = 24
 const MAX_VECTOR_INDEX_ENTRIES = 1200
+const MAX_VECTOR_CACHE_ENTRIES = 4000
 const TRANSFORMERS_VERSION = '2.17.2'
 const HUGGING_FACE_HOST = 'https://huggingface.co/'
 const HUGGING_FACE_TEMPLATE = '{model}/resolve/main/'
@@ -48,6 +49,42 @@ let extractorPromise: Promise<FeatureExtractor> | null = null
 let extractor: FeatureExtractor | null = null
 let lastEmbeddingError = ''
 const vectorCache = new Map<string, FactVectorIndexEntry>()
+
+const getVectorCacheEntry = (key: string): FactVectorIndexEntry | null => {
+  const hit = vectorCache.get(key)
+  if (!hit) return null
+  vectorCache.delete(key)
+  vectorCache.set(key, hit)
+  return hit
+}
+
+const setVectorCacheEntry = (key: string, entry: FactVectorIndexEntry): void => {
+  if (vectorCache.has(key)) {
+    vectorCache.delete(key)
+  }
+  vectorCache.set(key, entry)
+  if (vectorCache.size <= MAX_VECTOR_CACHE_ENTRIES) return
+
+  const overflow = vectorCache.size - MAX_VECTOR_CACHE_ENTRIES
+  const keys = vectorCache.keys()
+  for (let index = 0; index < overflow; index += 1) {
+    const oldest = keys.next()
+    if (oldest.done) break
+    vectorCache.delete(oldest.value)
+  }
+}
+
+const pruneVectorCacheForGraph = (graph: MemoryGraphState): void => {
+  if (vectorCache.size === 0) return
+  const factUpdatedAt = new Map(graph.facts.map((fact) => [fact.id, fact.updatedAt]))
+
+  for (const [key, entry] of vectorCache.entries()) {
+    const expectedUpdatedAt = factUpdatedAt.get(entry.factId)
+    if (!expectedUpdatedAt || expectedUpdatedAt !== entry.updatedAt || !Array.isArray(entry.vector) || entry.vector.length === 0) {
+      vectorCache.delete(key)
+    }
+  }
+}
 
 const toModelFileUrl = (model: string, fileName: string): string =>
   `${HUGGING_FACE_HOST}${HUGGING_FACE_TEMPLATE.replace('{model}', model).replace('{revision}', 'main')}${fileName}`
@@ -432,6 +469,7 @@ const runBrowserSemanticPrefilter = async (
   limit: number,
 ): Promise<{ results: SemanticPrefilterResult[]; graph: MemoryGraphState; embeddedCount: number }> => {
   const activeFacts = graph.facts.filter((fact) => fact.status !== 'superseded')
+  pruneVectorCacheForGraph(graph)
   const promptVector = await embedTextWithBrowser(prompt)
   const vectorsByFactId = new Map<string, number[]>()
   const newEntries: FactVectorIndexEntry[] = []
@@ -441,7 +479,7 @@ const runBrowserSemanticPrefilter = async (
       const factText = makeFactText(graph, fact.id, fact.canonicalText)
       const textHash = hashText(factText)
       const key = vectorCacheKey('browser', EMBEDDING_MODEL, fact.id, fact.updatedAt, factText)
-      let entry = vectorCache.get(key)
+      let entry = getVectorCacheEntry(key)
       if (entry) {
         vectorsByFactId.set(fact.id, entry.vector)
         return
@@ -449,7 +487,7 @@ const runBrowserSemanticPrefilter = async (
 
       const stored = findVectorInGraph(graph, 'browser', EMBEDDING_MODEL, fact.id, fact.updatedAt, textHash)
       if (stored) {
-        vectorCache.set(key, stored)
+        setVectorCacheEntry(key, stored)
         vectorsByFactId.set(fact.id, stored.vector)
         return
       }
@@ -463,7 +501,7 @@ const runBrowserSemanticPrefilter = async (
         model: EMBEDDING_MODEL,
         textHash,
       }
-      vectorCache.set(key, entry)
+      setVectorCacheEntry(key, entry)
       vectorsByFactId.set(fact.id, vector)
       newEntries.push(entry)
     }),
@@ -484,6 +522,7 @@ const runApiSemanticPrefilter = async (
   limit: number,
 ): Promise<{ results: SemanticPrefilterResult[]; graph: MemoryGraphState; embeddedCount: number }> => {
   const activeFacts = graph.facts.filter((fact) => fact.status !== 'superseded')
+  pruneVectorCacheForGraph(graph)
   const promptVector = (await embedTextsWithApi(client, lmStudioEmbeddingModel, [prompt]))[0] ?? []
   const vectorsByFactId = new Map<string, number[]>()
   const missing: Array<{ key: string; factId: string; text: string; updatedAt: string; textHash: string }> = []
@@ -493,14 +532,14 @@ const runApiSemanticPrefilter = async (
     const factText = makeFactText(graph, fact.id, fact.canonicalText)
     const textHash = hashText(factText)
     const key = vectorCacheKey('api', lmStudioEmbeddingModel, fact.id, fact.updatedAt, factText)
-    const existing = vectorCache.get(key)
+    const existing = getVectorCacheEntry(key)
     if (existing) {
       vectorsByFactId.set(fact.id, existing.vector)
       continue
     }
     const stored = findVectorInGraph(graph, 'api', lmStudioEmbeddingModel, fact.id, fact.updatedAt, textHash)
     if (stored) {
-      vectorCache.set(key, stored)
+      setVectorCacheEntry(key, stored)
       vectorsByFactId.set(fact.id, stored.vector)
       continue
     }
@@ -522,7 +561,7 @@ const runApiSemanticPrefilter = async (
     for (let index = 0; index < missing.length; index += 1) {
       const item = missing[index]
       const vector = vectors[index] ?? []
-      vectorCache.set(item.key, {
+      setVectorCacheEntry(item.key, {
         factId: item.factId,
         vector,
         updatedAt: item.updatedAt,
@@ -556,6 +595,7 @@ const runHashSemanticPrefilter = (
   limit: number,
 ): { results: SemanticPrefilterResult[]; graph: MemoryGraphState; embeddedCount: number } => {
   const activeFacts = graph.facts.filter((fact) => fact.status !== 'superseded')
+  pruneVectorCacheForGraph(graph)
   const promptVector = embedTextWithHash(prompt)
   const vectorsByFactId = new Map<string, number[]>()
   const newEntries: FactVectorIndexEntry[] = []
@@ -564,7 +604,7 @@ const runHashSemanticPrefilter = (
     const factText = makeFactText(graph, fact.id, fact.canonicalText)
     const textHash = hashText(factText)
     const key = vectorCacheKey('hash', HASH_EMBEDDING_MODEL, fact.id, fact.updatedAt, factText)
-    const cached = vectorCache.get(key)
+    const cached = getVectorCacheEntry(key)
     if (cached) {
       vectorsByFactId.set(fact.id, cached.vector)
       continue
@@ -572,7 +612,7 @@ const runHashSemanticPrefilter = (
 
     const stored = findVectorInGraph(graph, 'hash', HASH_EMBEDDING_MODEL, fact.id, fact.updatedAt, textHash)
     if (stored) {
-      vectorCache.set(key, stored)
+      setVectorCacheEntry(key, stored)
       vectorsByFactId.set(fact.id, stored.vector)
       continue
     }
@@ -586,7 +626,7 @@ const runHashSemanticPrefilter = (
       model: HASH_EMBEDDING_MODEL,
       textHash,
     }
-    vectorCache.set(key, entry)
+    setVectorCacheEntry(key, entry)
     vectorsByFactId.set(fact.id, vector)
     newEntries.push(entry)
   }
@@ -627,10 +667,13 @@ export const semanticPrefilterFacts = async (params: {
       } catch (apiError) {
         const apiMessage =
           apiError instanceof Error ? apiError.message : 'api embeddings failed'
+        const hashResult = runHashSemanticPrefilter(graph, prompt, limit)
         return {
-          results: [],
+          results: hashResult.results,
           usedFallback: true,
-          provider: 'api',
+          provider: 'hash',
+          graph: hashResult.graph,
+          embeddedCount: hashResult.embeddedCount,
           error: `${lastEmbeddingError || 'browser embeddings failed'} | ${apiMessage}`,
         }
       }
@@ -662,10 +705,13 @@ export const semanticPrefilterFacts = async (params: {
       } catch (apiError) {
         const apiMessage =
           apiError instanceof Error ? apiError.message : 'api embeddings failed'
+        const hashResult = runHashSemanticPrefilter(graph, prompt, limit)
         return {
-          results: [],
+          results: hashResult.results,
           usedFallback: true,
-          provider: 'api',
+          provider: 'hash',
+          graph: hashResult.graph,
+          embeddedCount: hashResult.embeddedCount,
           error: `${lastEmbeddingError || 'browser embeddings failed'} | ${apiMessage}`,
         }
       }
@@ -707,10 +753,13 @@ export const semanticPrefilterFacts = async (params: {
       } catch (apiError) {
         const apiMessage =
           apiError instanceof Error ? apiError.message : 'api embeddings failed'
+        const hashResult = runHashSemanticPrefilter(graph, prompt, limit)
         return {
-          results: [],
+          results: hashResult.results,
           usedFallback: true,
-          provider: 'api',
+          provider: 'hash',
+          graph: hashResult.graph,
+          embeddedCount: hashResult.embeddedCount,
           error: `${lastEmbeddingError} | ${apiMessage}`,
         }
       }

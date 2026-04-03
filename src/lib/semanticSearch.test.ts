@@ -140,6 +140,8 @@ describe('semanticSearch', () => {
     })
 
     expect(failed.usedFallback).toBe(true)
+    expect(failed.provider).toBe('hash')
+    expect(failed.results.length).toBeGreaterThan(0)
     expect(failed.error).toContain('api down')
     expect(semantic.getEmbeddingError()).toContain('HTML')
   })
@@ -204,6 +206,41 @@ describe('semanticSearch', () => {
 
     expect(result.provider).toBe('hash')
     expect(result.usedFallback).toBe(false)
+  })
+
+  it('falls back to hash provider when browser and API fail for empty graph', async () => {
+    vi.doMock('@xenova/transformers', () => ({
+      env: {
+        backends: {
+          onnx: {
+            wasm: {},
+          },
+        },
+      },
+      pipeline: vi.fn(async () => async () => ({ tolist: () => [[1, 0]] })),
+    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<!doctype html><html></html>', { status: 200, headers: { 'Content-Type': 'text/html' } })),
+    )
+
+    const semantic = await import('./semanticSearch')
+    await semantic.initializeEmbeddings(true)
+
+    const result = await semantic.semanticPrefilterFacts({
+      graph: { facts: [], evidence: [], aliases: [], conflicts: [], vectorIndex: [] },
+      prompt: 'hello',
+      client: {
+        embeddings: vi.fn(async () => {
+          throw new Error('api unavailable')
+        }),
+      } as never,
+      allowApiFallback: true,
+    })
+
+    expect(result.provider).toBe('hash')
+    expect(result.usedFallback).toBe(true)
+    expect(result.error).toContain('api unavailable')
   })
 
   it('embeds arbitrary memory text with hash provider when browser embeddings fail', async () => {

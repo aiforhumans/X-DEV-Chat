@@ -58,6 +58,7 @@ describe('fileIngest', () => {
     expect(result.jobs[0].status).toBe('done')
     expect(updates.some((line) => line.startsWith('processing'))).toBe(true)
     expect(result.graph.facts.length).toBeGreaterThan(0)
+    expect(result.addedFacts).toBeGreaterThan(0)
     expect(result.graph.facts[0].sourceTags).toContain('file')
     expect(result.graph.evidence[0].sourceType).toBe('file')
     expect(result.graph.evidence[0].sourceRef?.fileName).toBe('notes.txt')
@@ -76,5 +77,26 @@ describe('fileIngest', () => {
 
     expect(result.jobs[0].status).toBe('failed')
     expect(result.errors[0]).toContain('extract crash')
+  })
+
+  it('parses csv rows with quoted commas', async () => {
+    const mockClient = createMockLmStudioClient({
+      chat: vi.fn(async () => ({
+        output_text:
+          '{"facts":[{"canonicalText":"User likes tea","category":"preference","confidence":0.9,"aliases":[],"contradictionWith":[],"currentness":0.9}]}',
+      })),
+    })
+    const extractSpy = vi.spyOn(memoryGraph, 'extractFactsWithModel')
+
+    await ingestDroppedFiles({
+      files: [makeTextFile('prefs.csv', 'name,preference\n"Alice, B.","green tea"')],
+      model: 'mistral/test',
+      client: mockClient as unknown as LmStudioClient,
+      graph: emptyGraph(),
+    })
+
+    const firstChunk = extractSpy.mock.calls[0]?.[2] ?? ''
+    expect(firstChunk).toContain('Alice, B.')
+    expect(firstChunk).toContain('green tea')
   })
 })

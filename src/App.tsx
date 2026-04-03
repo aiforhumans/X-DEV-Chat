@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent, FormEvent, KeyboardEvent } from 'react'
 import './App.css'
 import {
+  clearEpisodes,
   DEFAULT_SESSION_ID,
   loadMemoryGraph,
   loadMessages,
   migrateLocalStateToDexieOnce,
+  resetProfileTurnCounter,
   saveMemoryGraph,
   saveMessages,
+  setEpisodeCursor,
 } from './db/database'
 import { applyStreamEvent, extractResponseId, initialAccumulator } from './lib/chatStream'
 import {
@@ -122,6 +125,7 @@ function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   }, [])
   const [baseUrl, setBaseUrl] = useState<string>(persisted.baseUrl || DEFAULT_BASE_URL)
+  const [baseUrlDraft, setBaseUrlDraft] = useState<string>(persisted.baseUrl || DEFAULT_BASE_URL)
   const [selectedModel, setSelectedModel] = useState<string>(persisted.selectedModel)
   const [selectedBrainModel, setSelectedBrainModel] = useState<string>(
     persisted.brainModel || DEFAULT_MEMORY_MODEL_ID,
@@ -174,6 +178,7 @@ function App() {
   const scenarioPromptRef = useRef<HTMLTextAreaElement>(null)
   const personaTextRef = useRef<HTMLTextAreaElement>(null)
   const sendInFlightRef = useRef(false)
+  const fileIngestInFlightRef = useRef(false)
   const memoryQueueRef = useRef(createMemoryQueue())
   const memoryGraphRef = useRef(memoryGraph)
 
@@ -193,70 +198,79 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
-    setEmbeddingStatus('loading')
-    void (async () => {
-      const status = await initializeEmbeddings()
+    const timer = window.setTimeout(() => {
       if (cancelled) return
-
-      if (status === 'ready') {
-        setEmbeddingStatus('ready')
-        setDebugEntries((current) => [
-          {
-            id: uid(),
-            at: new Date().toISOString(),
-            kind: 'embed' as const,
-            model: 'Xenova/all-MiniLM-L6-v2',
-            status: 'ready' as const,
-            raw: 'Embeddings initialization finished with browser provider',
-            embeddingStatus: 'ready' as const,
-          },
-          ...current,
-        ].slice(0, 60))
-        return
-      }
-
-      try {
-        await probeApiEmbeddings(client)
+      setEmbeddingStatus('loading')
+      void (async () => {
+        const status = await initializeEmbeddings()
         if (cancelled) return
-        setEmbeddingStatus('ready')
-        setDebugEntries((current) => [
-          {
-            id: uid(),
-            at: new Date().toISOString(),
-            kind: 'embed' as const,
-            model: getLmStudioEmbeddingModel(),
-            status: 'ready' as const,
-            raw: 'Browser embeddings unavailable; LM Studio API embeddings ready',
-            embeddingStatus: 'ready' as const,
-          },
-          ...current,
-        ].slice(0, 60))
-      } catch (error) {
-        if (cancelled) return
-        setEmbeddingStatus('failed')
-        setDebugEntries((current) => [
-          {
-            id: uid(),
-            at: new Date().toISOString(),
-            kind: 'embed' as const,
-            model: getLmStudioEmbeddingModel(),
-            status: 'failed' as const,
-            raw: '',
-            embeddingStatus: 'failed' as const,
-            error: error instanceof Error ? error.message : 'embedding init failed',
-          },
-          ...current,
-        ].slice(0, 60))
-      }
-    })()
+
+        if (status === 'ready') {
+          setEmbeddingStatus('ready')
+          setDebugEntries((current) => [
+            {
+              id: uid(),
+              at: new Date().toISOString(),
+              kind: 'embed' as const,
+              model: 'Xenova/all-MiniLM-L6-v2',
+              status: 'ready' as const,
+              raw: 'Embeddings initialization finished with browser provider',
+              embeddingStatus: 'ready' as const,
+            },
+            ...current,
+          ].slice(0, 60))
+          return
+        }
+
+        try {
+          await probeApiEmbeddings(client)
+          if (cancelled) return
+          setEmbeddingStatus('ready')
+          setDebugEntries((current) => [
+            {
+              id: uid(),
+              at: new Date().toISOString(),
+              kind: 'embed' as const,
+              model: getLmStudioEmbeddingModel(),
+              status: 'ready' as const,
+              raw: 'Browser embeddings unavailable; LM Studio API embeddings ready',
+              embeddingStatus: 'ready' as const,
+            },
+            ...current,
+          ].slice(0, 60))
+        } catch (error) {
+          if (cancelled) return
+          setEmbeddingStatus('failed')
+          setDebugEntries((current) => [
+            {
+              id: uid(),
+              at: new Date().toISOString(),
+              kind: 'embed' as const,
+              model: getLmStudioEmbeddingModel(),
+              status: 'failed' as const,
+              raw: '',
+              embeddingStatus: 'failed' as const,
+              error: error instanceof Error ? error.message : 'embedding init failed',
+            },
+            ...current,
+          ].slice(0, 60))
+        }
+      })()
+    }, 1200)
+
     return () => {
       cancelled = true
+      window.clearTimeout(timer)
     }
-  }, [client])
+  }, [])
 
   useEffect(() => {
     memoryGraphRef.current = memoryGraph
   }, [memoryGraph])
+
+  useEffect(() => {
+    setBaseUrlDraft(baseUrl)
+  }, [baseUrl])
 
   useEffect(() => {
     autoResizeTextarea(systemPromptRef.current)
@@ -388,6 +402,15 @@ function App() {
     return map
   }, [memoryGraph.evidence])
 
+  const applyBaseUrl = (): void => {
+    const normalized = baseUrlDraft.trim() || DEFAULT_BASE_URL
+    if (normalized === baseUrl) return
+    setBaseUrl(normalized)
+    setConnection('unknown')
+    setErrorBanner('')
+    setStatusLine(`LM Studio URL updated to ${normalized}`)
+  }
+
   const refreshModels = async (): Promise<ModelInfo[]> => {
     try {
       setStatusLine('Fetching models...')
@@ -477,16 +500,14 @@ function App() {
       return
     }
 
-    let factDelta = 0
-    let conflictDetected = false
+    const baseGraph = memoryGraphRef.current
+    const before = baseGraph.facts.length
+    const merged = mergeFactsWithConflicts(baseGraph, extraction, sourceMessageId)
+    const factDelta = merged.graph.facts.length - before
+    const conflictDetected = merged.conflictDetected
 
-    setMemoryGraph((current) => {
-      const before = current.facts.length
-      const merged = mergeFactsWithConflicts(current, extraction, sourceMessageId)
-      factDelta = merged.graph.facts.length - before
-      conflictDetected = merged.conflictDetected
-      return merged.graph
-    })
+    memoryGraphRef.current = merged.graph
+    setMemoryGraph(merged.graph)
 
     if (conflictDetected) {
       setMemoryStatus(analysis.usedFallback ? 'Conflict detected (json fallback)' : 'Conflict detected')
@@ -883,6 +904,27 @@ function App() {
     setEpisodeStatus('Idle')
     setProfileStatus('Idle')
     setStatusLine('New chat started')
+    void (async () => {
+      try {
+        await Promise.all([
+          setEpisodeCursor(DEFAULT_SESSION_ID, 0),
+          resetProfileTurnCounter(DEFAULT_SESSION_ID),
+          clearEpisodes(DEFAULT_SESSION_ID),
+        ])
+      } catch (error) {
+        pushDebug({
+          kind: 'episode-summary',
+          model: memoryTaskModel || selectedModel || 'none',
+          status: 'reset-failed',
+          raw: '',
+          error: toErrorMessage(error),
+          embeddingStatus,
+          personaEnabled: personaMode.enabled,
+          personaIntensity: personaMode.intensity,
+          personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+        })
+      }
+    })()
   }
 
   const lastAssistantMessage = useMemo(() => {
@@ -1080,9 +1122,14 @@ function App() {
       setErrorBanner('Select a brain model before file ingestion')
       return
     }
+    if (fileIngestInFlightRef.current) {
+      setErrorBanner('File ingest is already running')
+      return
+    }
 
     const files = Array.from(incomingFiles)
     if (files.length === 0) return
+    fileIngestInFlightRef.current = true
     setStatusLine(`Ingesting ${files.length} file(s)...`)
     pushDebug({
       kind: 'file',
@@ -1095,44 +1142,66 @@ function App() {
       personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
     })
 
-    const baselineFacts = memoryGraph.facts.length
-    const result = await ingestDroppedFiles({
-      files,
-      model: memoryTaskModel,
-      client,
-      graph: memoryGraph,
-      onJobUpdate: upsertFileJob,
-      onDebug: (message) => {
-        pushDebug({
-          kind: 'file',
-          model: memoryTaskModel,
-          status: 'processing',
-          raw: message,
-          embeddingStatus,
-          personaEnabled: personaMode.enabled,
-          personaIntensity: personaMode.intensity,
-          personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
-        })
-      },
-    })
+    try {
+      const result = await ingestDroppedFiles({
+        files,
+        model: memoryTaskModel,
+        client,
+        graph: memoryGraphRef.current,
+        getGraph: () => memoryGraphRef.current,
+        onGraphUpdate: (graph) => {
+          memoryGraphRef.current = graph
+          setMemoryGraph(graph)
+        },
+        onJobUpdate: upsertFileJob,
+        onDebug: (message) => {
+          pushDebug({
+            kind: 'file',
+            model: memoryTaskModel,
+            status: 'processing',
+            raw: message,
+            embeddingStatus,
+            personaEnabled: personaMode.enabled,
+            personaIntensity: personaMode.intensity,
+            personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+          })
+        },
+      })
 
-    setMemoryGraph(result.graph)
-    const addedFacts = Math.max(0, result.graph.facts.length - baselineFacts)
-    if (result.errors.length > 0) {
-      setErrorBanner(`File ingest warnings: ${result.errors.join(' | ')}`)
+      const addedFacts = result.addedFacts
+      if (result.errors.length > 0) {
+        setErrorBanner(`File ingest warnings: ${result.errors.join(' | ')}`)
+      }
+      setStatusLine('File ingest complete')
+      setMemoryStatus(`File ingest done (+${addedFacts} facts)`)
+      pushDebug({
+        kind: 'file',
+        model: memoryTaskModel,
+        status: result.errors.length > 0 ? 'done-with-warnings' : 'done',
+        raw: `jobs=${result.jobs.length} addedFacts=${addedFacts}${result.errors.length ? ` errors=${result.errors.join('; ')}` : ''}`,
+        embeddingStatus,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } catch (error) {
+      const message = toErrorMessage(error)
+      setErrorBanner(`File ingest failed: ${message}`)
+      setStatusLine('File ingest failed')
+      pushDebug({
+        kind: 'file',
+        model: memoryTaskModel,
+        status: 'failed',
+        raw: '',
+        error: message,
+        embeddingStatus,
+        personaEnabled: personaMode.enabled,
+        personaIntensity: personaMode.intensity,
+        personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
+      })
+    } finally {
+      fileIngestInFlightRef.current = false
     }
-    setStatusLine('File ingest complete')
-    setMemoryStatus(`File ingest done (+${addedFacts} facts)`)
-    pushDebug({
-      kind: 'file',
-      model: memoryTaskModel,
-      status: result.errors.length > 0 ? 'done-with-warnings' : 'done',
-      raw: `jobs=${result.jobs.length} addedFacts=${addedFacts}${result.errors.length ? ` errors=${result.errors.join('; ')}` : ''}`,
-      embeddingStatus,
-      personaEnabled: personaMode.enabled,
-      personaIntensity: personaMode.intensity,
-      personaBlockLength: buildPersonaPrompt(personaMode).personaBlock.length,
-    })
   }
 
   const onDropZoneDragOver = (event: DragEvent<HTMLDivElement>): void => {
@@ -1370,11 +1439,26 @@ function App() {
         <label htmlFor="baseUrl">LM Studio URL</label>
         <input
           id="baseUrl"
-          value={baseUrl}
-          onChange={(event) => setBaseUrl(event.target.value)}
+          value={baseUrlDraft}
+          onChange={(event) => setBaseUrlDraft(event.target.value)}
+          onBlur={applyBaseUrl}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault()
+              applyBaseUrl()
+            }
+          }}
           placeholder={DEFAULT_BASE_URL}
           disabled={isStreaming}
         />
+        <div className="button-row">
+          <button
+            onClick={applyBaseUrl}
+            disabled={isStreaming || (baseUrlDraft.trim() || DEFAULT_BASE_URL) === baseUrl}
+          >
+            Apply URL
+          </button>
+        </div>
 
         <p className={`connection ${connection}`}>Connection: {connection}</p>
 
