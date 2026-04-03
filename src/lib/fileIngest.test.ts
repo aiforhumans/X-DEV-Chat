@@ -99,4 +99,48 @@ describe('fileIngest', () => {
     expect(firstChunk).toContain('Alice, B.')
     expect(firstChunk).toContain('green tea')
   })
+
+  it('merges ingest chunks against latest graph snapshot via getGraph', async () => {
+    const now = new Date().toISOString()
+    const externalFactGraph: MemoryGraphState = {
+      facts: [
+        {
+          id: 'external-fact',
+          canonicalText: 'User already prefers summaries',
+          category: 'preference',
+          status: 'active',
+          confidence: 0.8,
+          sourceTags: ['chat'],
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      evidence: [],
+      aliases: [],
+      conflicts: [],
+      vectorIndex: [],
+    }
+
+    const mockClient = createMockLmStudioClient({
+      chat: vi.fn(async () => ({
+        output_text:
+          '{"facts":[{"canonicalText":"User likes tea","category":"preference","confidence":0.9,"aliases":["tea"],"contradictionWith":[],"currentness":0.9}]}',
+      })),
+    })
+
+    let latestGraph = externalFactGraph
+    const result = await ingestDroppedFiles({
+      files: [makeTextFile('notes.txt', 'user likes tea')],
+      model: 'mistral/test',
+      client: mockClient as unknown as LmStudioClient,
+      graph: emptyGraph(),
+      getGraph: () => latestGraph,
+      onGraphUpdate: (graph) => {
+        latestGraph = graph
+      },
+    })
+
+    expect(result.graph.facts.some((fact) => fact.id === 'external-fact')).toBe(true)
+    expect(result.graph.facts.some((fact) => /likes tea/i.test(fact.canonicalText))).toBe(true)
+  })
 })

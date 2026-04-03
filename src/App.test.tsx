@@ -391,6 +391,18 @@ describe('App', () => {
     await screen.findByText((text) => text.includes('Embeddings failed:') && text.includes('api down'))
   })
 
+  it('defers embeddings initialization until explicit retry', async () => {
+    render(<App />)
+    await screen.findByLabelText('Main LLM model')
+
+    expect(mocks.mockInitializeEmbeddings).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry embeddings' }))
+    await waitFor(() => {
+      expect(mocks.mockInitializeEmbeddings).toHaveBeenCalledWith(true)
+    })
+  })
+
   it('optimizes system prompt and applies accepted preview', async () => {
     render(<App />)
     await screen.findByLabelText('Main LLM model')

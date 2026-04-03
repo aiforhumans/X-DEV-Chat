@@ -48,7 +48,9 @@ Open the Vite URL shown in terminal (usually `http://localhost:5173`).
 | `npm run preview` | Serves the production build locally |
 | `npm run test` | Runs unit tests (default test command) |
 | `npm run test:unit` | Runs unit tests excluding integration tests |
-| `npm run test:coverage` | Runs unit tests with coverage |
+| `npm run test:coverage` | Runs coverage checks for core libs and App/DB profiles |
+| `npm run test:coverage:core` | Runs stricter coverage thresholds for `src/lib/**` |
+| `npm run test:coverage:appdb` | Runs coverage thresholds for `src/App.tsx` and `src/db/**` |
 | `npm run test:integration` | Runs LM Studio live integration test suite |
 | `npm run check` | Runs tests and build (recommended before PRs) |
 

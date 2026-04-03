@@ -11,6 +11,7 @@ import type {
   RerankResult,
 } from '../types/chat'
 import type { LmStudioClient } from './lmStudioClient'
+import { extractTextFromChatResponse, parseJsonLoose } from './llmResponseParsing'
 
 export const MEMORY_VERSION = 2
 export const MAX_FACTS = 300
@@ -95,58 +96,6 @@ const recencyWeight = (dateValue: string): number => {
   if (Number.isNaN(ts)) return 0
   const ageDays = Math.max(0, (Date.now() - ts) / (1000 * 60 * 60 * 24))
   return 1 / (1 + ageDays / 14)
-}
-
-const extractTextFromChatResponse = (payload: Record<string, unknown>): string => {
-  if (typeof payload.output_text === 'string') return payload.output_text
-  if (typeof payload.text === 'string') return payload.text
-
-  const output = payload.output
-  if (!Array.isArray(output)) return ''
-
-  let combined = ''
-  for (const item of output) {
-    if (!item || typeof item !== 'object') continue
-    const maybeItem = item as Record<string, unknown>
-    const content = maybeItem.content
-    if (!Array.isArray(content)) continue
-    for (const part of content) {
-      if (!part || typeof part !== 'object') continue
-      const maybePart = part as Record<string, unknown>
-      if (typeof maybePart.text === 'string') {
-        combined += maybePart.text
-      }
-    }
-  }
-
-  return combined.trim()
-}
-
-const parseJsonLoose = (raw: string): unknown => {
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim()
-    if (fenced) {
-      try {
-        return JSON.parse(fenced)
-      } catch {
-        // continue
-      }
-    }
-
-    const firstBrace = raw.indexOf('{')
-    const lastBrace = raw.lastIndexOf('}')
-    if (firstBrace >= 0 && lastBrace > firstBrace) {
-      try {
-        return JSON.parse(raw.slice(firstBrace, lastBrace + 1))
-      } catch {
-        // continue
-      }
-    }
-
-    return null
-  }
 }
 
 const repairStructuredOutput = async (

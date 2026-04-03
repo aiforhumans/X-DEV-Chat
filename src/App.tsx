@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { DragEvent, FormEvent, KeyboardEvent } from 'react'
 import './App.css'
+import { ChatTimeline } from './components/ChatTimeline'
+import { DebugDrawer } from './components/DebugDrawer'
+import { OptimizerPreviewModal } from './components/OptimizerPreviewModal'
+import { autoResizeTextarea, useAutoResizeTextarea } from './hooks/useAutoResizeTextarea'
 import {
   clearEpisodes,
   DEFAULT_SESSION_ID,
@@ -64,33 +68,13 @@ import type {
   StreamEvent,
   SystemPromptOptimizationResult,
 } from './types/chat'
+import type { BrainDebugEntry } from './types/debug'
 
 const uid = (): string => `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 const DEFAULT_MEMORY_MODEL_ID = 'liquid/lfm2.5-1.2b'
 
 const toErrorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : 'Something went wrong'
-
-interface BrainDebugEntry {
-  id: string
-  kind: 'extract' | 'rerank' | 'optimize' | 'embed' | 'file' | 'episode-summary' | 'profile-extract'
-  at: string
-  model: string
-  status: string
-  prompt?: string
-  shortlistCount?: number
-  selectedCount?: number
-  raw: string
-  parsePath?: string
-  optimizeTarget?: 'system' | 'persona' | 'scenario'
-  optimizerSystemPromptUsed?: string
-  chatSystemMessageSnapshot?: string
-  embeddingStatus?: EmbeddingStatus
-  error?: string
-  personaEnabled?: boolean
-  personaIntensity?: number
-  personaBlockLength?: number
-}
 
 const emptyGraph = (): MemoryGraphState => ({
   facts: [],
@@ -107,12 +91,6 @@ const isEmbeddingModel = (model: ModelInfo): boolean => {
   if (model.type === 'embedding') return true
   const id = `${model.id || ''} ${model.key || ''}`.toLowerCase()
   return id.includes('embedding') || id.includes('embed')
-}
-
-const autoResizeTextarea = (element: HTMLTextAreaElement | null): void => {
-  if (!element) return
-  element.style.height = 'auto'
-  element.style.height = `${element.scrollHeight}px`
 }
 
 function App() {
@@ -197,71 +175,7 @@ function App() {
   }, [selectedEmbedModel])
 
   useEffect(() => {
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      if (cancelled) return
-      setEmbeddingStatus('loading')
-      void (async () => {
-        const status = await initializeEmbeddings()
-        if (cancelled) return
-
-        if (status === 'ready') {
-          setEmbeddingStatus('ready')
-          setDebugEntries((current) => [
-            {
-              id: uid(),
-              at: new Date().toISOString(),
-              kind: 'embed' as const,
-              model: 'Xenova/all-MiniLM-L6-v2',
-              status: 'ready' as const,
-              raw: 'Embeddings initialization finished with browser provider',
-              embeddingStatus: 'ready' as const,
-            },
-            ...current,
-          ].slice(0, 60))
-          return
-        }
-
-        try {
-          await probeApiEmbeddings(client)
-          if (cancelled) return
-          setEmbeddingStatus('ready')
-          setDebugEntries((current) => [
-            {
-              id: uid(),
-              at: new Date().toISOString(),
-              kind: 'embed' as const,
-              model: getLmStudioEmbeddingModel(),
-              status: 'ready' as const,
-              raw: 'Browser embeddings unavailable; LM Studio API embeddings ready',
-              embeddingStatus: 'ready' as const,
-            },
-            ...current,
-          ].slice(0, 60))
-        } catch (error) {
-          if (cancelled) return
-          setEmbeddingStatus('failed')
-          setDebugEntries((current) => [
-            {
-              id: uid(),
-              at: new Date().toISOString(),
-              kind: 'embed' as const,
-              model: getLmStudioEmbeddingModel(),
-              status: 'failed' as const,
-              raw: '',
-              embeddingStatus: 'failed' as const,
-              error: error instanceof Error ? error.message : 'embedding init failed',
-            },
-            ...current,
-          ].slice(0, 60))
-        }
-      })()
-    }, 1200)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
+    setEmbeddingStatus(getEmbeddingStatus())
   }, [])
 
   useEffect(() => {
@@ -272,17 +186,9 @@ function App() {
     setBaseUrlDraft(baseUrl)
   }, [baseUrl])
 
-  useEffect(() => {
-    autoResizeTextarea(systemPromptRef.current)
-  }, [systemPrompt])
-
-  useEffect(() => {
-    autoResizeTextarea(scenarioPromptRef.current)
-  }, [scenarioPrompt])
-
-  useEffect(() => {
-    autoResizeTextarea(personaTextRef.current)
-  }, [personaMode.personaText])
+  useAutoResizeTextarea(systemPromptRef, systemPrompt)
+  useAutoResizeTextarea(scenarioPromptRef, scenarioPrompt)
+  useAutoResizeTextarea(personaTextRef, personaMode.personaText)
 
   useEffect(() => {
     let cancelled = false
@@ -1422,6 +1328,47 @@ function App() {
     }
   }
 
+  const handleReasoningToggle = (messageId: string, open: boolean): void => {
+    setShowReasoningById((current) => ({
+      ...current,
+      [messageId]: open,
+    }))
+  }
+
+  const acceptOptimizerPreview = (preview: NonNullable<typeof optimizerPreview>): void => {
+    if (preview.target === 'persona') {
+      setPersonaMode((current) => ({
+        ...current,
+        personaText: preview.result.optimizedPrompt,
+        personaUpdatedAt: new Date().toISOString(),
+      }))
+      setPersonaOptimizerStatus('idle')
+    } else if (preview.target === 'scenario') {
+      setScenarioPrompt(preview.result.optimizedPrompt)
+      setScenarioOptimizerStatus('idle')
+    } else {
+      setSystemPrompt(preview.result.optimizedPrompt)
+      setOptimizerStatus('idle')
+    }
+
+    setLastOptimizationMeta({
+      at: new Date().toISOString(),
+      model: selectedModel,
+    })
+    setOptimizerPreview(null)
+  }
+
+  const rejectOptimizerPreview = (preview: NonNullable<typeof optimizerPreview>): void => {
+    setOptimizerPreview(null)
+    if (preview.target === 'persona') {
+      setPersonaOptimizerStatus('idle')
+    } else if (preview.target === 'scenario') {
+      setScenarioOptimizerStatus('idle')
+    } else {
+      setOptimizerStatus('idle')
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1700,33 +1647,11 @@ function App() {
           {errorBanner ? <span className="error">{errorBanner}</span> : null}
         </div>
 
-        <section className="timeline">
-          {messages.length === 0 ? <p className="empty">Start by loading a model and sending a message.</p> : null}
-          {messages.map((message) => (
-            <article key={message.id} className={`bubble ${message.role}`}>
-              <header>
-                <strong>{message.role}</strong>
-                <time>{new Date(message.createdAt).toLocaleTimeString()}</time>
-              </header>
-              <p>{message.content || (message.partial ? '...' : '')}</p>
-
-              {message.role === 'assistant' && message.reasoning ? (
-                <details
-                  open={Boolean(showReasoningById[message.id])}
-                  onToggle={(event) =>
-                    setShowReasoningById((current) => ({
-                      ...current,
-                      [message.id]: (event.target as HTMLDetailsElement).open,
-                    }))
-                  }
-                >
-                  <summary>Reasoning</summary>
-                  <pre>{message.reasoning}</pre>
-                </details>
-              ) : null}
-            </article>
-          ))}
-        </section>
+        <ChatTimeline
+          messages={messages}
+          showReasoningById={showReasoningById}
+          onToggleReasoning={handleReasoningToggle}
+        />
 
         <section className="composer">
           <div
@@ -1902,137 +1827,18 @@ function App() {
         </div>
       </aside>
 
-      <aside className={`debug-drawer ${debugOpen ? 'open' : ''}`}>
-        <div className="debug-head">
-          <h2>Brain Debug</h2>
-          <div className="memory-actions">
-            <button onClick={() => setDebugEntries([])} disabled={debugEntries.length === 0}>
-              Clear logs
-            </button>
-            <button onClick={() => setDebugOpen(false)}>Close</button>
-          </div>
-        </div>
-        <div className="debug-list">
-          {debugEntries.length === 0 ? <p className="empty">No debug events yet.</p> : null}
-          {debugEntries.map((entry) => (
-            <article key={entry.id} className="memory-item">
-              <header>
-                <strong>{entry.kind}</strong>
-                <span>{entry.status}</span>
-              </header>
-              <p className="memory-meta">
-                {new Date(entry.at).toLocaleTimeString()} | model: {entry.model}
-              </p>
-              {entry.prompt ? (
-                <p>
-                  prompt: <code>{entry.prompt.slice(0, 120)}</code>
-                </p>
-              ) : null}
-              {entry.kind !== 'optimize' ? (
-                <p className="memory-meta">
-                  shortlist: {entry.shortlistCount ?? '-'} | selected: {entry.selectedCount ?? '-'}
-                </p>
-              ) : (
-                <>
-                  <p className="memory-meta">
-                    target: {entry.optimizeTarget ?? 'system'} | parse path: {entry.parsePath ?? '-'}
-                  </p>
-                  <p className="memory-meta">
-                    optimizer system prompt: <code>{(entry.optimizerSystemPromptUsed ?? '').slice(0, 120)}</code>
-                  </p>
-                  <p className="memory-meta">
-                    chat system message: <code>{(entry.chatSystemMessageSnapshot ?? '').slice(0, 120)}</code>
-                  </p>
-                </>
-              )}
-              <p className="memory-meta">
-                embeddings: {entry.embeddingStatus ?? '-'} | persona: {entry.personaEnabled ? 'on' : 'off'} |
-                intensity: {entry.personaIntensity ?? '-'} | block: {entry.personaBlockLength ?? 0}
-              </p>
-              {entry.error ? <p className="error">{entry.error}</p> : null}
-              <details>
-                <summary>Raw response</summary>
-                <pre>{entry.raw || '[empty]'}</pre>
-              </details>
-            </article>
-          ))}
-        </div>
-      </aside>
+      <DebugDrawer
+        debugOpen={debugOpen}
+        debugEntries={debugEntries}
+        onClear={() => setDebugEntries([])}
+        onClose={() => setDebugOpen(false)}
+      />
 
-      {optimizerPreview ? (
-        <div className="optimizer-overlay" role="dialog" aria-modal="true" aria-label="Prompt optimization preview">
-          <article className="optimizer-modal">
-            <header>
-              <h2>
-                {optimizerPreview.target === 'persona'
-                  ? 'Optimized Custom Persona'
-                  : optimizerPreview.target === 'scenario'
-                    ? 'Optimized Scenario Block'
-                    : 'Optimized System Prompt'}
-              </h2>
-            </header>
-            <section>
-              <h3>
-                {optimizerPreview.target === 'persona'
-                  ? 'Current Custom Persona'
-                  : optimizerPreview.target === 'scenario'
-                    ? 'Current Scenario Block'
-                    : 'Current Chat System Message'}
-              </h3>
-              <pre>{optimizerPreview.currentPrompt || '[empty]'}</pre>
-            </section>
-            <section>
-              <h3>Improved Prompt</h3>
-              <pre>{optimizerPreview.result.optimizedPrompt}</pre>
-            </section>
-            <section>
-              <h3>Rationale</h3>
-              <p>{optimizerPreview.result.rationale}</p>
-            </section>
-            <div className="memory-actions">
-              <button
-                onClick={() => {
-                  if (optimizerPreview.target === 'persona') {
-                    setPersonaMode((current) => ({
-                      ...current,
-                      personaText: optimizerPreview.result.optimizedPrompt,
-                      personaUpdatedAt: new Date().toISOString(),
-                    }))
-                    setPersonaOptimizerStatus('idle')
-                  } else if (optimizerPreview.target === 'scenario') {
-                    setScenarioPrompt(optimizerPreview.result.optimizedPrompt)
-                    setScenarioOptimizerStatus('idle')
-                  } else {
-                    setSystemPrompt(optimizerPreview.result.optimizedPrompt)
-                    setOptimizerStatus('idle')
-                  }
-                  setLastOptimizationMeta({
-                    at: new Date().toISOString(),
-                    model: selectedModel,
-                  })
-                  setOptimizerPreview(null)
-                }}
-              >
-                Accept
-              </button>
-              <button
-                onClick={() => {
-                  setOptimizerPreview(null)
-                  if (optimizerPreview.target === 'persona') {
-                    setPersonaOptimizerStatus('idle')
-                  } else if (optimizerPreview.target === 'scenario') {
-                    setScenarioOptimizerStatus('idle')
-                  } else {
-                    setOptimizerStatus('idle')
-                  }
-                }}
-              >
-                Reject
-              </button>
-            </div>
-          </article>
-        </div>
-      ) : null}
+      <OptimizerPreviewModal
+        preview={optimizerPreview}
+        onAccept={acceptOptimizerPreview}
+        onReject={rejectOptimizerPreview}
+      />
     </div>
   )
 }

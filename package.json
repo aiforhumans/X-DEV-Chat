@@ -22,7 +22,9 @@
     "check": "npm run test && npm run build",
     "test": "npm run test:unit",
     "test:unit": "vitest run --exclude \"src/**/*.integration.test.ts\"",
-    "test:coverage": "vitest run --coverage --exclude \"src/**/*.integration.test.ts\"",
+    "test:coverage": "npm run test:coverage:core && npm run test:coverage:appdb",
+    "test:coverage:core": "vitest run --config vitest.coverage.core.config.ts --coverage --exclude \"src/**/*.integration.test.ts\"",
+    "test:coverage:appdb": "vitest run --config vitest.coverage.appdb.config.ts --coverage --exclude \"src/**/*.integration.test.ts\"",
     "test:integration": "vitest run src/lib/lmStudio.integration.test.ts --passWithNoTests"
   },
   "dependencies": {

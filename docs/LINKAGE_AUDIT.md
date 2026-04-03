@@ -43,6 +43,10 @@ Primary runtime entrypoint: `src/App.tsx`.
 
 - `src/App.tsx` depends on:
   - `db/database`
+  - `components/ChatTimeline`
+  - `components/DebugDrawer`
+  - `components/OptimizerPreviewModal`
+  - `hooks/useAutoResizeTextarea`
   - `lib/lmStudioClient`
   - `lib/chatStream`
   - `lib/memoryGraph`
@@ -57,6 +61,7 @@ Primary runtime entrypoint: `src/App.tsx`.
 - `lib/fileIngest` depends on `lib/memoryGraph`.
 - `lib/episodicMemory` depends on `db/database`, `lib/memoryGraph`, `lib/memoryIntelligence`, and `lib/semanticSearch`.
 - `lib/semanticSearch` depends on `lib/lmStudioClient` and browser transformers runtime.
+- `lib/llmResponseParsing` provides shared response text + loose JSON parse utilities used by multiple memory/optimizer modules.
 
 ## Test Ownership Matrix
 

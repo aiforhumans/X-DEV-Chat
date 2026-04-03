@@ -18,9 +18,16 @@ Last updated: April 3, 2026
 
 | Priority | Item | Scope | Notes |
 | --- | --- | --- | --- |
-| P1 | Break `App.tsx` into feature hooks/components | `src/App.tsx` | Reduce orchestration coupling and improve targeted testability. |
-| P2 | Add targeted fallback/race regression tests | `src/App.test.tsx`, `src/lib/*.test.ts` | Extend assertions for concurrent ingest + fallback telemetry paths. |
-| P2 | Tune coverage thresholds by module criticality | `vitest.config.ts` | Consider per-scope thresholds once toolchain supports stable per-path gates. |
-| P3 | Consolidate repeated parsing utilities | `src/lib/memoryGraph.ts`, `src/lib/memoryIntelligence.ts`, `src/lib/systemPromptOptimizer.ts` | Introduce shared parser helpers to reduce duplication. |
-| P3 | Reduce embedding runtime startup/build impact | `src/lib/semanticSearch.ts`, Vite build config | Evaluate more aggressive lazy loading/provider toggles and alternative runtime strategy. |
+| P1 | Break `App.tsx` into feature hooks/components | `src/App.tsx`, `src/components/*`, `src/hooks/*` | Done: extracted timeline, debug drawer, optimizer modal, and textarea auto-resize hook. |
+| P2 | Add targeted fallback/race regression tests | `src/App.test.tsx`, `src/lib/*.test.ts` | Done: added lazy embedding-init test and ingest latest-graph race test. |
+| P2 | Tune coverage thresholds by module criticality | `vitest.coverage.*.config.ts`, `package.json` | Done: split coverage into core-lib and app/db threshold profiles. |
+| P3 | Consolidate repeated parsing utilities | `src/lib/llmResponseParsing.ts` + consumers | Done: centralized response text extraction + loose JSON parse helpers. |
+| P3 | Reduce embedding runtime startup/build impact | `src/App.tsx` | Done: removed eager embedding bootstrap; initialization is now user-triggered/lazy. |
 
+## Follow-up ideas
+
+| Priority | Item | Scope | Notes |
+| --- | --- | --- | --- |
+| P2 | Extract memory panel + model/settings panel components | `src/App.tsx`, `src/components/*` | Continue shrinking `App.tsx` by moving right/left sidebar sections. |
+| P2 | Add integration regression for API->hash fallback telemetry in send path | `src/App.test.tsx` | Assert debug entries and status transitions during forced fallback. |
+| P3 | Evaluate optional browser-embeddings toggle to avoid transformer load entirely | `src/lib/semanticSearch.ts`, UI settings | Could further reduce runtime cost on low-resource setups. |

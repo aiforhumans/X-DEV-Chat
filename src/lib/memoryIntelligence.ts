@@ -6,6 +6,7 @@ import type {
   ProfileExtractionResult,
 } from '../types/chat'
 import type { LmStudioClient } from './lmStudioClient'
+import { extractTextFromChatResponse } from './llmResponseParsing'
 import { extractFactsWithModel } from './memoryGraph'
 
 const DEFAULT_WORKING_WINDOW = 10
@@ -15,35 +16,6 @@ const MAX_TRANSCRIPT_CHARS_PROFILE = 1500
 const MAX_FACT_BULLETS = 5
 const MAX_PROFILE_BULLETS = 4
 const MAX_MESSAGE_SNIPPET = 180
-
-const extractTextFromChatResponse = (payload: Record<string, unknown>): string => {
-  if (typeof payload.output_text === 'string') return payload.output_text
-  if (typeof payload.text === 'string') return payload.text
-
-  const output = payload.output
-  if (!Array.isArray(output)) return ''
-
-  let combined = ''
-  for (const item of output) {
-    if (!item || typeof item !== 'object') continue
-    const maybeItem = item as Record<string, unknown>
-    const content = maybeItem.content
-    if (typeof content === 'string') {
-      combined += content
-      continue
-    }
-    if (!Array.isArray(content)) continue
-    for (const part of content) {
-      if (!part || typeof part !== 'object') continue
-      const maybePart = part as Record<string, unknown>
-      if (typeof maybePart.text === 'string') {
-        combined += maybePart.text
-      }
-    }
-  }
-
-  return combined.trim()
-}
 
 const shortRole = (role: ChatMessage['role']): string => {
   if (role === 'assistant') return 'Assistant'
