@@ -49,7 +49,8 @@ Local-first React + Vite chat UI for [LM Studio](https://lmstudio.ai/) with stre
 | [React](https://react.dev/) | 19 |
 | [TypeScript](https://www.typescriptlang.org/) | ~5.9 |
 | [Vite](https://vitejs.dev/) | 8 |
-| [Vitest](https://vitest.dev/) + [Testing Library](https://testing-library.com/) | 3.x |
+| [Vitest](https://vitest.dev/) | 3.2.x |
+| [Testing Library](https://testing-library.com/) | 16.x / 6.x |
 | [Dexie](https://dexie.org/) (IndexedDB) | 4.x |
 
 ## Prerequisites
@@ -164,6 +165,8 @@ LMSTUDIO_TEST_EMBED_MODEL=text-embedding-nomic-embed-text-v1.5
 └── README.md
 ```
 
+> Note: This tree is a high-level overview of key files and directories, not a complete repository listing.
+
 ## CI / GitHub Workflow
 
 CI runs automatically on every push to `main`/`master` and on all pull requests.
@@ -208,4 +211,3 @@ Generated artifacts (`coverage/`, `.env`) are git-ignored and must not be commit
 ## License
 
 No license file is currently included.
-
